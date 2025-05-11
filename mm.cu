@@ -296,7 +296,7 @@ __global__ void custom_kernel_bak(const float* a, const float* b, const float* a
 }
 
 
-__global__ void custom_kernel(const float* A, const float* B, const float* as, const float* bs, float* C, int m, int n, int k) {
+__global__ void custom_kernel_bak_bak(const float* A, const float* B, const float* as, const float* bs, float* C, int m, int n, int k) {
     int tx = threadIdx.x;
     int ty = threadIdx.y;
     int bx = blockIdx.x;
@@ -340,12 +340,53 @@ __global__ void custom_kernel(const float* A, const float* B, const float* as, c
 
 }
 
+__global__ void custom_kernel(const float* A, const float* B, const float* as, const float* bs, float* C, int m, int n, int k) {
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    int cx = bx * TILE_WIDTH + tx; 
+    int cy = by * TILE_WIDTH + ty; 
+
+    int lane_id = threadIdx.x & 0x1f;
+
+    float A_val = 0.0;
+    float B_val = 0.0;
+    float C_val = 0.0;
+
+    // fill up two 4-by-4 cells
+    //
+    // A_00 A_01 A_02 A_03
+    // A_10 A_11 A_12 A_23
+    // A_20 A_01 A_22 A_23
+    // A_30 A_31 A_32 A_33
+    //
+    // lane_id < 16 -> lane_id/4 + lane_id%4 
+    //
+
+
+    for (int i = 0; i < k/TILE_WIDTH; i++) {
+        if (lane_id < 16) {
+            A_val = A[cx + (i * 4 + lane_id%4)*k];
+        } else {
+            B_val = B[cy + (i * 4 + lane_id%4)*k];
+        }
+
+        for (int s = 0; s < 16; s++) {
+            for (int q = 0; q < 16; q++) {
+                C_val += __shfl_sync(0xffffffff, A_val, s%4) * __shfl_sync(0xffffffff, B_val, q%4);                    }
+            } 
+        }
+
+    C[cx * n + cy] = C_val;
+}
+
 int main() {
       int m = 1024;
       float diff = 0.0;
-      int runs = 5;
+      int runs = 2;
       for (int i = 0; i < runs; i++) {
-          diff += compare_mat_mul_kernels(mat_mul_ref, custom_kernel_bak, m, m, m, false, dim3(m/TILE_WIDTH,m/TILE_WIDTH ), dim3(TILE_WIDTH, TILE_WIDTH), dim3(m/TILE_WIDTH, m/TILE_WIDTH), dim3(TILE_WIDTH, TILE_WIDTH)); 
+         diff += compare_mat_mul_kernels(mat_mul_ref, custom_kernel, m, m, m, false, dim3(m/TILE_WIDTH,m/TILE_WIDTH ), dim3(TILE_WIDTH, TILE_WIDTH), dim3(m/TILE_WIDTH, m/TILE_WIDTH), dim3(TILE_WIDTH, TILE_WIDTH)); 
       }
       printf("\n%f\n", diff/runs);
       diff = 0.0;
