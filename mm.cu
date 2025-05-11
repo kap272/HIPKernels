@@ -114,7 +114,7 @@ void cudaDeviceSynchronize_wrapped() {
     }
 }
 
-void compare_mat_mul_kernels(mat_mul_func f, mat_mul_func g, int m, int k, int n, bool print_results, dim3 f_grid_dims, dim3 f_block_dims, dim3 g_grid_dims, dim3 g_block_dims) {
+float compare_mat_mul_kernels(mat_mul_func f, mat_mul_func g, int m, int k, int n, bool print_results, dim3 f_grid_dims, dim3 f_block_dims, dim3 g_grid_dims, dim3 g_block_dims) {
     // A m-by-k matrix in column major format
     // B k-by-n matrix in column major format (repressented as a n-by-k)
     // C m-by-n matrix in row major format
@@ -127,14 +127,7 @@ void compare_mat_mul_kernels(mat_mul_func f, mat_mul_func g, int m, int k, int n
     float* A = generate_random_matrix(m, k); 
     float* B = generate_random_matrix(n, k); 
 
-    for (int i = 0; i < 16; i++) {
-        for (int j = 0; j < 16; j++) {
-            printf("%f ", B[i + m * j]);
-        }
-        printf("\n");
-    }
 
-    printf("\n");
     float* alpha = generate_random_matrix(m, k/128);
     float* beta = generate_random_matrix(n, k/128);
 
@@ -207,10 +200,6 @@ void compare_mat_mul_kernels(mat_mul_func f, mat_mul_func g, int m, int k, int n
         printf("results dont match \n");
     }
     
-    printf("g           f \n");
-    for (int l = 0; l < 25; l++) {
-        printf("%f %f \n", C_h_g[l], C_h_f[l]);
-    }
 
     if (!matrices_are_equal(C_h_f, C_h_g, m, n, m, n)) {
         printf("kernel g is wrong!\n");
@@ -227,10 +216,12 @@ void compare_mat_mul_kernels(mat_mul_func f, mat_mul_func g, int m, int k, int n
     cudaFree(B_d);
     free(A);
     free(B);
+
+    return ((g_time - f_time)/f_time);
 }
 constexpr const int BLOCK = 128;
 constexpr const int TILE_WIDTH = 16;
-constexpr const int TILES_PER_BLOCK = 8;
+constexpr const int TILES_PER_BLOCK = BLOCK/TILE_WIDTH;
 
 // A, B, C, as, bs, C, m, n, k
 __global__ void mat_mul_ref(const float* a, const float* b, const float* as, const float* bs, float* c, int m, int n, int k) {
@@ -260,22 +251,19 @@ __global__ void mat_mul_ref(const float* a, const float* b, const float* as, con
         // before we can go to the next block, scale the result of the current block
         // and accumulate to final result
         // note the different indexing into as and bs
-        result += block_result * as[cx + i/BLOCK * m] * bs[cy/BLOCK + i/BLOCK * sn];
+        result += block_result ;//* as[cx + i/BLOCK * m] * bs[cy/BLOCK + i/BLOCK * sn];
     }
     
     // finally, write the result as bf16
     c[cx * n + cy] = result; 
 }
 
-__global__ void custom_kernel(const float* a, const float* b, const float* as, const float* bs, float* c, int m, int n, int k) {
+__global__ void custom_kernel_bak(const float* a, const float* b, const float* as, const float* bs, float* c, int m, int n, int k) {
     // Your implementation here
     int row = threadIdx.x + blockDim.x * blockIdx.x;
     int col = threadIdx.y + blockDim.y * blockIdx.y;
     int tx = threadIdx.x;
     int ty = threadIdx.y;
-    if (row == 0 && col == 0) {
-        printf(" grid and thead %d %d %d %d \n \n", gridDim.x, gridDim.y, blockDim.x, blockDim.y);
-    }
 
     if(row >= m || col >= n) {
         return;
@@ -283,8 +271,8 @@ __global__ void custom_kernel(const float* a, const float* b, const float* as, c
     
     int sn = (n + BLOCK - 1) / BLOCK;
     
-    __shared__ float A_tile[16][16];
-    __shared__ float B_tile[16][16];
+    __shared__ float A_tile[TILE_WIDTH][TILE_WIDTH];
+    __shared__ float B_tile[TILE_WIDTH][TILE_WIDTH];
 
     float result = 0.0;
 
@@ -293,31 +281,77 @@ __global__ void custom_kernel(const float* a, const float* b, const float* as, c
     for (int inner_dim_idx = 0; inner_dim_idx < k; inner_dim_idx += BLOCK) {
         float block_result = 0.0;
         for (int tile_num = 0; tile_num < TILES_PER_BLOCK; tile_num++) {
-            if (row == 0 && col == 2 && inner_dim_idx == 0 && tile_num == 0 && tx == 0 && ty == 2) {
-                printf("row 0 col 2 %f \n", a[row + m * (inner_dim_idx  + (tile_num * TILE_WIDTH) + ty)]);
-            }
             A_tile[tx][ty] = a[row + m * (inner_dim_idx  + (tile_num * TILE_WIDTH) + ty)];
             B_tile[ty][tx] = b[col + n * (inner_dim_idx  + (tile_num * TILE_WIDTH )+ tx)];
             __syncthreads();
             for (int k = 0; k < TILE_WIDTH; k++) {
                 block_result += A_tile[tx][k] * B_tile[ty][k];
             }
-            if (row == 0 && col == 0 && inner_dim_idx == 0 && tile_num == 0) {
-                for (int q = 0; q < 16; q++) {
-                    for (int w = 0; w < 16; w++) {
-                        printf("%f ", B_tile[q][w]);
-                    }
-                    printf("\n");
-                }
-            };
             __syncthreads();
         } 
-        result += block_result  * as[row + inner_dim_idx/BLOCK * m] * bs[col/BLOCK + inner_dim_idx/BLOCK * sn];
+        result += block_result;//  * as[row + inner_dim_idx/BLOCK * m] * bs[col/BLOCK + inner_dim_idx/BLOCK * sn];
         __syncthreads();
     } 
     c[row* n + col] = result;
 }
-int main() {
-      int m = 128;
-      compare_mat_mul_kernels(mat_mul_ref, custom_kernel, m, m, m, false, dim3(m/TILE_WIDTH,m/TILE_WIDTH ), dim3(TILE_WIDTH, TILE_WIDTH), dim3(m/TILE_WIDTH, m/TILE_WIDTH), dim3(TILE_WIDTH, TILE_WIDTH)); 
+
+
+__global__ void custom_kernel(const float* A, const float* B, const float* as, const float* bs, float* C, int m, int n, int k) {
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    int cx = bx * TILE_WIDTH + tx; 
+    int cy = by * TILE_WIDTH + ty; 
+
+    if (cx >= m || cy >= n) {
+        return;
+    }
+
+    float C_val = 0.0;
+
+    __shared__ float A_tile[TILE_WIDTH][TILE_WIDTH];
+    __shared__ float B_tile[TILE_WIDTH][TILE_WIDTH];
+
+    for (int i = 0; i < k/TILE_WIDTH; i++) { 
+        // fill the tile with a row of A and a row of B
+        // we need row cx of A and row cy of B
+        // fill one row of the tile with one column slice
+        A_tile[ty][tx] = A[cx + (i * TILE_WIDTH + ty ) * m]; //A[tx][ty];
+        B_tile[ty][tx] = B[tx + (i * TILE_WIDTH + cy ) * m];
+        __syncthreads();
+
+//        for (int q = 0; q < TILE_WIDTH; q++) {
+//            for (int w = 0; w < TILE_WIDTH; w++) {
+//                A_tile[q][w] == A[];
+//
+//            }
+//        }
+
+        for (int j = 0; j < TILE_WIDTH; j++) {
+            //C_val += A_tile[j][ty] * B_tile[j][tx];
+            C_val += A_tile[j][tx] * B_tile[j][ty];
+        }
+        __syncthreads();
+    }
+
+    C[cx * n + cy] = C_val;
+
+
 }
+
+int main() {
+      int m = 1024;
+      float diff = 0.0;
+      int runs = 5;
+      for (int i = 0; i < runs; i++) {
+          diff += compare_mat_mul_kernels(mat_mul_ref, custom_kernel_bak, m, m, m, false, dim3(m/TILE_WIDTH,m/TILE_WIDTH ), dim3(TILE_WIDTH, TILE_WIDTH), dim3(m/TILE_WIDTH, m/TILE_WIDTH), dim3(TILE_WIDTH, TILE_WIDTH)); 
+      }
+      printf("\n%f\n", diff/runs);
+      diff = 0.0;
+     // for (int i = 0; i < runs; i++) {
+     //     diff += compare_mat_mul_kernels(mat_mul_ref, custom_kernel, m, m, m, false, dim3(m/TILE_WIDTH,m/TILE_WIDTH ), dim3(TILE_WIDTH, TILE_WIDTH), dim3(m/TILE_WIDTH, m/TILE_WIDTH), dim3(TILE_WIDTH, TILE_WIDTH)); 
+     // }
+     // printf("\n%f\n", diff/runs);
+}
+
