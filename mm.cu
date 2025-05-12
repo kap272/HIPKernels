@@ -206,8 +206,43 @@ float compare_mat_mul_kernels(mat_mul_func f, mat_mul_func g, int m, int k, int 
     }
     cudaFree(C_d_g);
     if (print_results) {
-//        printf("g result: \n");
-        print_matrix(C_h_g, m, n);
+        int R = 0;
+        printf("g result: \n");
+
+        for (int row = 0; row < R; row++) {
+            for (int col = 0; col < R; col++) {
+                printf("%f ", C_h_g[row * n + col]);
+            }
+            printf("\n");
+        }
+
+        printf("f result: \n");
+
+        for (int row = 0; row < R; row++) {
+            for (int col = 0; col < R; col++) {
+                printf("%f ", C_h_f[row * n + col]);
+            }
+            printf("\n");
+        }
+
+
+        int miss = 0;
+        int total = 0;
+        int zero = 0;
+        for (int row = 0; row < m; row++) {
+            for (int col = 0; col < n; col++) {
+                if (C_h_f[row * n + col] != C_h_g[row * n + col]) {
+                   miss += 1; 
+                   if (C_h_g[row * n + col] == 0.0) {
+                       zero += 1;
+                   }
+                }
+                total += 1;
+            }
+        }
+        printf("miss: %d zero: %d total: %d \n", miss, zero, total);
+        printf("miss rate : %f \n", miss/(float)total);
+        printf("zero rate : %f \n ", zero/(float)total);
     }
 
     printf("kernel f run time: %f\n", f_time);
@@ -348,45 +383,56 @@ __global__ void custom_kernel(const float* A, const float* B, const float* as, c
     int cx = bx * TILE_WIDTH + tx; 
     int cy = by * TILE_WIDTH + ty; 
 
-    int lane_id = threadIdx.x & 0x1f;
+    int lane_id = (threadIdx.y * blockDim.x + threadIdx.x);
 
     float A_val = 0.0;
     float B_val = 0.0;
     float C_val = 0.0;
 
-    // fill up two 4-by-4 cells
-    //
-    // A_00 A_01 A_02 A_03
-    // A_10 A_11 A_12 A_23
-    // A_20 A_01 A_22 A_23
-    // A_30 A_31 A_32 A_33
-    //
-    // lane_id < 16 -> lane_id/4 + lane_id%4 
-    //
-
-
-    for (int i = 0; i < k/TILE_WIDTH; i++) {
+    //if (cx == 0 && cy == 0) {
+    //    printf("%d %d %d %d", blockDim.x, blockDim.y, threadIdx.x, threadIdx.y);
+    //}
+    for (int i = 0; i < k; i += blockDim.x) {
         if (lane_id < 16) {
-            A_val = A[cx + (i * 4 + lane_id%4)*k];
+            A_val = A[cx + m * (i + lane_id%8)];    
         } else {
-            B_val = B[cy + (i * 4 + lane_id%4)*k];
+            B_val = B[cy + n * (i + lane_id%8)];    
+        }
+            if (i == 0 && cx == 0 && cy == 0) {
+                
+                //for (int A_tile_idx = 0; A_tile_idx < 16; A_tile_idx++) {
+                //    printf("%f ", __shfl_sync(0xffffffff, A_val, A_tile_idx));
+                //} 
+
+                printf("\n");
+                
+                for (int A_row = 0; A_row < 2; A_row++) {
+                    for (int A_col = 0; A_col < 8; A_col++) {
+                        printf("%f ", A[A_row + A_col * m]);
+                }
+                printf("\n");
+            }
+            }
+
+        for (int j = 0; j < blockIdx.x; j++) {
+            //if (i == 0) {
+            //    printf("%f %f \n", __shfl_sync(0xffffffff, A_val, j) , __shfl_sync(0xffffffff, B_val, j + 16));
+            //}
+            C_val += __shfl_sync(0xffffffff, A_val, j) * __shfl_sync(0xffffffff, B_val, j + 16);
         }
 
-        for (int s = 0; s < 16; s++) {
-            for (int q = 0; q < 16; q++) {
-                C_val += __shfl_sync(0xffffffff, A_val, s%4) * __shfl_sync(0xffffffff, B_val, q%4);                    }
-            } 
-        }
+    }
 
     C[cx * n + cy] = C_val;
 }
 
 int main() {
-      int m = 1024;
+
+      int m = 128;
       float diff = 0.0;
-      int runs = 2;
+      int runs = 10;
       for (int i = 0; i < runs; i++) {
-         diff += compare_mat_mul_kernels(mat_mul_ref, custom_kernel, m, m, m, false, dim3(m/TILE_WIDTH,m/TILE_WIDTH ), dim3(TILE_WIDTH, TILE_WIDTH), dim3(m/TILE_WIDTH, m/TILE_WIDTH), dim3(TILE_WIDTH, TILE_WIDTH)); 
+         diff += compare_mat_mul_kernels(mat_mul_ref, custom_kernel_bak_bak, m, m, m, true, dim3(m/TILE_WIDTH,m/TILE_WIDTH ), dim3(TILE_WIDTH, TILE_WIDTH), dim3(m/8, m/4), dim3(8, 4)); 
       }
       printf("\n%f\n", diff/runs);
       diff = 0.0;
