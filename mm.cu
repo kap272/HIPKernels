@@ -428,12 +428,16 @@ __global__ void custom_kernel(const float* A, const float* B, const float* as, c
 
 int main() {
 
-      int m = 128;
-      float diff = 0.0;
-      int runs = 10;
-      for (int i = 0; i < runs; i++) {
-         diff += compare_mat_mul_kernels(mat_mul_ref, custom_kernel_bak_bak, m, m, m, true, dim3(m/TILE_WIDTH,m/TILE_WIDTH ), dim3(TILE_WIDTH, TILE_WIDTH), dim3(m/8, m/4), dim3(8, 4)); 
-      }
+    int m = 128;
+    float diff = 0.0;
+    int runs = 20;
+    float inc= 0.0;
+    for (int i = 0; i < runs; i++) {
+        inc = compare_mat_mul_kernels(mat_mul_ref, custom_kernel_bak_bak, m, m, m, true, dim3(m/TILE_WIDTH,m/TILE_WIDTH ), dim3(TILE_WIDTH, TILE_WIDTH), dim3(m/8, m/4), dim3(8, 4));  
+        if (i != 0) {
+          diff += inc;
+        }
+    }
       printf("\n%f\n", diff/runs);
       diff = 0.0;
      // for (int i = 0; i < runs; i++) {
