@@ -1,3 +1,4 @@
+
 #include <hip/amd_detail/amd_hip_fp8.h>
 
 #include <hip/amd_detail/amd_hip_bf16.h>
@@ -15,12 +16,13 @@
 
 #define BLOCK 128
  
- 
 __global__ void mat_mul_ref(const __hip_fp8_e4m3_fnuz* a, const __hip_fp8_e4m3_fnuz* b, const float* as, const float* bs, __hip_bfloat16* c, int m, int n, int k) {
 
     // Your implementation here
+
     int cx = threadIdx.x + blockDim.x * blockIdx.x;
     int cy = threadIdx.y + blockDim.y * blockIdx.y;
+
     if(cx >= m || cy >= n) return;
 
     int sn = (n + BLOCK - 1) / BLOCK;
@@ -33,7 +35,7 @@ __global__ void mat_mul_ref(const __hip_fp8_e4m3_fnuz* a, const __hip_fp8_e4m3_f
         // within each block, scales are constant, so we can lift the scaling
         // outside of the inner loop.
         float block_result = 0;
-        for(int ii = 0; ii < BLOCK; ++ii) {
+        for(int ii = 0; ii < min(k, BLOCK); ++ii) {
             // load input matrix elements and convert to float for computations
             float av = (float)a[cx + (i + ii) * m];
             float bv = (float)b[cy + (i + ii) * n];
@@ -43,7 +45,8 @@ __global__ void mat_mul_ref(const __hip_fp8_e4m3_fnuz* a, const __hip_fp8_e4m3_f
         // before we can go to the next block, scale the result of the current block
         // and accumulate to final result
         // note the different indexing into as and bs
-        result += block_result * as[cx + i/BLOCK * m] * bs[cy/BLOCK + i/BLOCK * sn];
+//        result += block_result * as[cx + i/BLOCK * m] * bs[cy/BLOCK + i/BLOCK * sn];
+        result += block_result; 
     }
 
     // finally, write the result as bf16
@@ -66,6 +69,56 @@ __global__ void sgemm_16x16x4(const float *A, const float *B, float *D)
     const int idx = threadIdx.x + i * N + threadIdx.y * 4 * N;
     D[idx] = dmn[i];
   }
+}
+
+__device__ inline uint32_t pack_f8_f32(__hip_fp8_e4m3_fnuz a0, __hip_fp8_e4m3_fnuz a1, __hip_fp8_e4m3_fnuz a2, __hip_fp8_e4m3_fnuz a3) {
+    return (uint32_t(a3) << 24) |
+           (uint32_t(a2) << 16) |
+           (uint32_t(a1) << 8)  |
+           (uint32_t(a0));
+}
+
+
+__global__ void sgemm_16x16x4_e4m3(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8_e4m3_fnuz* B, const float* as, const float* bs, __hip_bfloat16* C, int A_rows, int A_cols, int B_cols) {
+  using float4 = __attribute__( (__vector_size__(K * sizeof(float)) )) float;
+  float4 dmn = {0};
+
+  int lane_id = (threadIdx.y * blockDim.x + threadIdx.x) % 64;
+
+  // determine the upper left corner of the tiles in the input
+  // ths is the offset against which to map lane id to matrix indices
+  int upper_left_x = blockDim.x * blockIdx.x;
+  int upper_left_y = blockDim.y * blockIdx.y * 4;
+
+  // within the tile & wrt the offset
+  // the mapping goes lane_id -> A[lane_id%16][lane_id//16]
+  //                  lane_id -> B_T[lane_id//16][lane_id%16] or  
+  //                  lane_id -> B[lane_id%16][lane_id//16]
+                    
+  // TODO: use shared memory
+  __shared__ float A_tile[16][4];
+  __shared__ float B_tile[16][4];
+  
+  int A_row = upper_left_y + lane_id%16;
+  int B_row = upper_left_x+ lane_id%16;
+
+  for (int i = 0; i < A_cols; i += 4) {
+      int A_col = (i) + lane_id/16;
+      int B_col = (i) + lane_id/16;
+
+      __hip_fp8_e4m3_fnuz A_val = A[A_row + A_col * A_rows]; 
+      __hip_fp8_e4m3_fnuz B_val = B[B_row + B_col * A_rows]; 
+
+      dmn = __builtin_amdgcn_mfma_f32_16x16x4f32(A_val, B_val, dmn, 0, 0, 0);
+
+      for (int p = 0; p < 4; ++p) {
+            // lane_id -> C[4 * lane_id/16 + i][lane_id % 16] for i = 0, 1, 2, 3
+            int C_row = upper_left_y + (4 * (lane_id/16)) + p;
+            int C_col = upper_left_x + (lane_id % 16);
+
+            C[C_row * B_cols + C_col] = (__hip_bfloat16) dmn[p];
+          }
+      }
 }
 
 __global__ void custom_kernel_bak(const float* A, const float* B, const float* as, const float* bs, float* C, int m, int n, int k) {
@@ -114,7 +167,7 @@ __global__ void custom_kernel_bak(const float* A, const float* B, const float* a
 
 }
 
-__global__ void custom_kernel(const float* A, const float* B, const float* as, const float* bs, float* C, int m, int n, int k) {
+__global__ void custom_kernel_bak_bak(const float* A, const float* B, const float* as, const float* bs, float* C, int m, int n, int k) {
     int cx = threadIdx.x + blockIdx.x * blockDim.x; 
     int cy = threadIdx.y + blockIdx.y * blockDim.y; 
     int lane_id = (threadIdx.y * blockDim.x + threadIdx.x) % 64;
@@ -163,16 +216,51 @@ __global__ void custom_kernel(const float* A, const float* B, const float* as, c
          
         A_tile[lane_id%16][lane_id/16] = A[A_idx];
         B_tile[lane_id/16][lane_id%16] = B[B_idx];
-        __syncthreads();
+         if (cx == 0 && cy == 0 && i == 0) {
+            
+                printf("A tile \n");
+            for (int i = 0; i < 16; i++) {
+                for (int j = 0 ; j < 4; j++) {
+                        printf("%f ", A_tile[i][j]);
+                    }
+                printf("\n");
+            }       __syncthreads();
+         }
 
-        if (cx == 2 && cy == 2) {
-            printf("%f %f \n", A[0], B[0]);
+        cmn = __builtin_amdgcn_mfma_f32_16x16x4f32(amk, bkn, cmn, 0, 0, 0);
+        __syncthreads();
+        if (cx == 0 && cy == 0 && i == 0) {
+            
+                printf("A tile \n");
+            for (int i = 0; i < 16; i++) {
+                for (int j = 0 ; j < 4; j++) {
+                        printf("%f ", A_tile[i][j]);
+                    }
+                printf("\n");
+            }
+                printf("\n");
+
+                printf("B tile \n");
+            for (int i = 0; i < 4; i++) {
+                for (int j = 0 ; j < 16; j++) {
+                        printf("%f ", B_tile[i][j]);
+                    }
+                printf("\n");
+            }
+                printf("\n");
+                printf("cmn \n");
+            for (int i = 0; i < 4; i++) {
+                printf("%f \n", cmn[i]); 
+                    
+            }
+                printf("\n");
+
+
             printf("%d %d \n", upper_left_y, upper_left_x);
             printf("lane id: %d, A row, col: %d, %d, A idx: %d, A val: %f\n", lane_id, A_row + 1, A_col + 1, A_idx, amk);
             printf("             B row, col: %d, %d, B idx: %d, B val: %f\n\n",         B_row + 1, B_col + 1, B_idx, bkn);
         }
-        cmn = __builtin_amdgcn_mfma_f32_16x16x4f32(amk, bkn, cmn, 0, 0, 0);
-        __syncthreads();
+
         // TODO unroll
         for (int i = 0; i < 4; ++i) {
             const int idx = threadIdx.x + i * N + threadIdx.y * 4 * N;
@@ -183,22 +271,96 @@ __global__ void custom_kernel(const float* A, const float* B, const float* as, c
         }
 
     }
-
-
-
-
         
 }
-void print_matrix(float* A, int rows, int cols) {
+//__device__ void run_mfma_fp8(float4 &acc, uint32_t a_packed, uint32_t b_packed) {
+//    asm volatile(
+//        "v_mfma_f32_16x16x64_fp8_e4m3 %0, %1, %2, %0\n"
+//        : "=v"(acc)               // output
+//        : "v"(a_packed),          // input A
+//          "v"(b_packed),          // input B
+//          "0"(acc)                // initial accumulator
+//    );
+//}
+
+
+__global__ void custom_kernel(const float* A, const float* B, const float* as, const float* bs, float* C, int m, int n, int k) {
+    int cx = threadIdx.x + blockDim.x * blockIdx.x;
+    int cy = threadIdx.y + blockDim.y * blockIdx.y;
+
+    int lane_id = (threadIdx.y * blockDim.x + threadIdx.x) % 64;
+
+    if (cx >= m || cy >= n) {
+        return;
+    }
+
+    using float4 = __attribute__( (__vector_size__(K * sizeof(float)) )) float;
+    float4 cmn = {0};
+
+    int idx = lane_id/4 + lane_id%4;
+    int upper_left_x = blockDim.x * blockIdx.x;
+    int upper_left_y = blockDim.y * blockIdx.y;
+
+    int A_row = upper_left_y + lane_id%16;
+    int A_col = upper_left_x + lane_id/16;
+
+    int B_row = upper_left_y + lane_id/16;
+    int B_col = upper_left_x + lane_id%16;
+    
+    int A_idx = A_row * 4 + A_col;
+    int B_idx = B_row * 16 + B_col;
+
+
+    float amk = A[A_idx];
+    float bkn = B[B_idx];
+
+    cmn = __builtin_amdgcn_mfma_f32_16x16x4f32(amk, bkn, cmn, 0, 0, 0);
+
+    printf("lane id %d A row %d A col %d A val %f \n", lane_id, A_row + 1, A_col + 1, amk);
+    printf("lane id %d B row %d B col %d B val %f \n\n", lane_id, B_row + 1, B_col + 1 , bkn);
+    if (lane_id == 6) {
+        printf("%f %f \n", A[0], B[0]);
+        printf("%d %d \n", upper_left_y, upper_left_x);
+        printf("lane id: %d, A row, col: %d, %d, A idx: %d, A val: %f\n", lane_id, A_row + 1, A_col + 1, A_idx, amk);
+        printf("             B row, col: %d, %d, B idx: %d, B val: %f\n\n",         B_row + 1, B_col + 1, B_idx, bkn);
+
+        for (int i = 0; i < 4; ++i) {
+            printf("%f \n", cmn[i]);
+
+        }
+    }
+
+
+    for (int i = 0; i < 4; ++i) {
+//        const int idx = threadIdx.x + i * N + threadIdx.y * 4 * N;
+//        C[idx] += cmn[i];
+//
+        int c_row = upper_left_y + 4 * (lane_id/16) + i;
+        int c_col = upper_left_x + lane_id%16;
+        
+        printf("lane id %d upper_left_y %d upper_left_x %d C row %d C col %d curr C val %f cmn val %f \n", lane_id,
+                upper_left_y + 1, 
+                upper_left_x + 1, 
+                1 + c_row, 
+                1 + c_col,
+                C[c_row * k + c_col],
+                cmn[i]);
+
+        C[c_row * k + c_col] = cmn[i];
+        }
+
+    }
+
+template<typename T> void print_matrix(T* A, int rows, int cols) {
     for (int i = 0; i < rows; i++) {
         for (int j = 0; j < cols; j++) {
-            printf("%.1f ", A[cols * i + j]);
+            printf("%.1f ", static_cast<float>(A[i + j * rows]));
         }
         printf("\n");
     }
     printf("\n");
 }
-bool matrices_are_equal(float* A, float *B, int A_rows, int A_cols, int B_rows, int B_cols) {
+template<typename T> bool matrices_are_equal(T* A, T *B, int A_rows, int A_cols, int B_rows, int B_cols) {
     if (A_rows != B_rows || A_cols != B_cols) {
         return false;
     }
@@ -216,91 +378,372 @@ bool matrices_are_equal(float* A, float *B, int A_rows, int A_cols, int B_rows, 
 
 }
 
-void mat_mul(float* A, float* B, float* C, int A_rows, int A_cols, int B_cols) {
+template<typename T, typename U > void mat_mul(T* A, T* B, U* C, int A_rows, int A_cols, int B_cols) {
     for (int i = 0; i < A_rows; i++) {
         for (int j = 0; j < B_cols; j++) {
-            float C_val = 0.0;
+            U C_val = 0.0;
             for (int l = 0; l < A_cols; l++) {
-                C_val += A[i * A_cols + l] * B[l * B_cols + j];
+                C_val += (U) A[i * A_cols + l] * B[l * B_cols + j];
             }
             C[i * B_cols + j] = C_val;
         }
     }
 }
 
-template<typename T> std::vector<T> generate_random_vector(int rows, int cols) {
+template<typename T>
+std::vector<T> generate_random_vector(int rows, int cols) {
     std::random_device rnd_device;
     std::mt19937 mersenne_engine {rnd_device()};  
     std::uniform_int_distribution<int> dist {1, 10};
-    
-    auto gen = [&](){ return (T) dist(mersenne_engine); };
-    std::vector<T> vec(sizeof(T) * rows * cols);
+
+    auto gen = [&](){ return static_cast<T>(dist(mersenne_engine)); };
+
+    std::vector<T> vec(rows * cols);
     std::generate(vec.begin(), vec.end(), gen);
-    
-    return vec; 
+
+    return vec;
 }
 
-int main() {
-    int A_rows = 32;
-    int A_cols = 32;
-    int B_cols = 32;
-    const size_t size_A = sizeof(float) * A_rows * A_cols;
-    const size_t size_B = sizeof(float) * A_cols * B_cols;
-    const size_t size_D = sizeof(float) * A_rows * B_cols;
 
-//    std::vector<float> h_A(size_A, 1.0f); 
-    std::vector<float> h_A = generate_random_vector<float>(A_rows, A_cols); // (size_A, 1.0f); 
-    std::vector<float> h_B = generate_random_vector<float>(A_cols, B_cols);
-    std::vector<float> h_D = generate_random_vector<float>(A_rows, B_cols);
-    std::vector<float> C(size_D, 0.0f);
+typedef void (*mat_mul_func)(const __hip_fp8_e4m3_fnuz* a, const __hip_fp8_e4m3_fnuz* b, const float* as, const float* bs, __hip_bfloat16* c, int m, int n, int k);
+
+float test_mat_mul_knl(mat_mul_func f, int A_rows, int A_cols, int B_cols, dim3 grid_dims, dim3 block_dims, bool print) {
+    const size_t A_size = sizeof(__hip_fp8_e4m3_fnuz) * A_rows * A_cols;
+    const size_t B_size = sizeof(__hip_fp8_e4m3_fnuz) * A_cols * B_cols;
+    const size_t C_size = sizeof(__hip_bfloat16) * A_rows * B_cols;
+
+    std::vector<__hip_fp8_e4m3_fnuz> A_h = generate_random_vector<__hip_fp8_e4m3_fnuz>(A_rows, A_cols); // (size_A, 1.0f); 
+    std::vector<__hip_fp8_e4m3_fnuz> B_h = generate_random_vector<__hip_fp8_e4m3_fnuz>(B_cols, A_cols);
+    std::vector<__hip_bfloat16> C_h(A_rows * B_cols, (__hip_bfloat16) 0.0f);
+    std::vector<__hip_bfloat16> C(A_rows * B_cols, (__hip_bfloat16) 0.0f);
     
     std::vector<float> alpha = generate_random_vector<float>(1, 1);
     std::vector<float> beta = generate_random_vector<float>(1, 1);
     
-    print_matrix(h_A.data(), A_rows, A_cols);
-    printf("\n");
-    printf("\n");
-    print_matrix(h_B.data(), A_cols, B_cols);
-    printf("\n");
-    printf("\n");
-
-    float *d_A, *d_B, *d_D;
-    hipMalloc(&d_A, size_A * sizeof(float));
-    hipMalloc(&d_B, size_B * sizeof(float));
-    hipMalloc(&d_D, size_D * sizeof(float));
-
-    hipMemcpy(d_A, h_A.data(), size_A * sizeof(float), hipMemcpyHostToDevice);
-    hipMemcpy(d_B, h_B.data(), size_B * sizeof(float), hipMemcpyHostToDevice);
-
-    dim3 block(16, 16);
-    dim3 grid(A_rows/16, B_cols/16);
-    hipLaunchKernelGGL(custom_kernel, grid, block, 0, 0, d_A, d_B, alpha.data(), beta.data(),  d_D, A_rows, A_cols, B_cols);
-    hipDeviceSynchronize();
-
-    hipMemcpy(h_D.data(), d_D, size_D * sizeof(float), hipMemcpyDeviceToHost);
-
-    for (int i = 0; i < M; ++i) {
-        for (int j = 0; j < N; ++j) {
-            std::cout << h_D[i * N + j] << " ";
-        }
-        std::cout << "\n";
+    if (print) {
+        print_matrix<__hip_fp8_e4m3_fnuz>(A_h.data(), A_rows, A_cols);
+        printf("\n");
+        printf("\n");
+        print_matrix<__hip_fp8_e4m3_fnuz>(B_h.data(), A_cols, B_cols);
+        printf("\n");
+        printf("\n");
     }
-    mat_mul(h_A.data(), h_B.data(), C.data(), A_rows, A_cols, B_cols);
 
-    printf("\n");
-    printf("\n");
-    print_matrix(C.data(), A_rows, B_cols);
-    printf("\n");
-    printf("\n");
+    __hip_fp8_e4m3_fnuz *A_d, *B_d;
+    __hip_bfloat16 *C_d;
+    hipMalloc(&A_d, A_size) ;
+    hipMalloc(&B_d, B_size);
+    hipMalloc(&C_d, C_size);
 
-    assert(matrices_are_equal(C.data(), h_D.data(), A_rows, B_cols, A_rows, B_cols));
+    hipMemcpy(A_d, A_h.data(), A_size, hipMemcpyHostToDevice);
+    hipMemcpy(B_d, B_h.data(), B_size, hipMemcpyHostToDevice);
 
+    hipEvent_t start, stop;
+    hipEventCreate(&start);
+    hipEventCreate(&stop);
+    hipEventRecord(start, 0);
+    hipLaunchKernelGGL(sgemm_16x16x4_e4m3, grid_dims, block_dims, 0, 0, A_d, B_d, alpha.data(), beta.data(), C_d, A_rows, A_cols, B_cols);
+    hipEventRecord(stop, 0);
+    hipEventSynchronize(stop);
+    float ms = 0;
+    hipEventElapsedTime(&ms, start, stop);
+    hipEventDestroy(start);
+    hipEventDestroy(stop);
+
+    hipMemcpy(C_h.data(), C_d, C_size, hipMemcpyDeviceToHost);
+
+    if (print) {
+        print_matrix<__hip_bfloat16>(C_h.data(), A_rows, B_cols);
+    }
+    mat_mul<__hip_fp8_e4m3_fnuz, __hip_bfloat16>(A_h.data(), B_h.data(), C.data(), A_rows, A_cols, B_cols);
+
+    if (print) {
+        printf("\n");
+        printf("\n");
+        print_matrix(C.data(), A_rows, B_cols);
+        printf("\n");
+        printf("\n");
+    }
+
+    //assert(matrices_are_equal(C.data(), C_h.data(), A_rows, B_cols, A_rows, B_cols));
     printf("done \n");
+    hipFree(A_d); 
+    A_d = nullptr;
+    hipFree(B_d); 
+    B_d = nullptr;
+    hipFree(C_d); 
+    C_d = nullptr;
 
-    hipFree(d_A);
-    hipFree(d_B);
-    hipFree(d_D);
+    printf("time knl : %f \n", ms);
+    return ms;
+} 
 
-    return 0;
+float compare_mat_mul_knls(mat_mul_func f, mat_mul_func g, int A_rows, int A_cols, int B_cols, dim3 f_grid_dims, dim3 f_block_dims, dim3 g_grid_dims, dim3 g_block_dims, bool print, int runs) {
+    const size_t A_size = sizeof(__hip_fp8_e4m3_fnuz) * A_rows * A_cols;
+    const size_t B_size = sizeof(__hip_fp8_e4m3_fnuz) * A_cols * B_cols;
+    const size_t C_size = sizeof(__hip_bfloat16) * A_rows * B_cols;
+
+    float ms_f_total = 0.0;
+    float ms_g_total = 0.0;
+
+    for (int i = 0; i < runs + 1; i++) {
+        // TODO: factor out mallocs
+        std::vector<__hip_fp8_e4m3_fnuz> A_h = generate_random_vector<__hip_fp8_e4m3_fnuz>(A_rows, A_cols); // (size_A, 1.0f); 
+        std::vector<__hip_fp8_e4m3_fnuz> B_h = generate_random_vector<__hip_fp8_e4m3_fnuz>(A_cols, B_cols);
+        std::vector<__hip_bfloat16> C_h_f(A_rows * B_cols, (__hip_bfloat16) 0.0f);
+        std::vector<__hip_bfloat16> C_h_g(A_rows * B_cols, (__hip_bfloat16) 0.0f);
+        
+        std::vector<float> alpha = generate_random_vector<float>(1, 1);
+        std::vector<float> beta = generate_random_vector<float>(1, 1);
+        
+        if (print) {
+            printf("A: \n");
+            print_matrix<__hip_fp8_e4m3_fnuz>(A_h.data(), A_rows, A_cols);
+            printf("B: \n");
+            print_matrix<__hip_fp8_e4m3_fnuz>(B_h.data(), B_cols, A_cols);
+            printf("\n");
+        }
+
+        __hip_fp8_e4m3_fnuz *A_d, *B_d;
+        __hip_bfloat16 *C_d_f, *C_d_g;
+        
+        hipMalloc(&A_d, A_size) ;
+        hipMalloc(&B_d, B_size);
+        hipMalloc(&C_d_f, C_size);
+        hipMalloc(&C_d_g, C_size);
+
+        hipMemcpy(A_d, A_h.data(), A_size, hipMemcpyHostToDevice);
+        hipMemcpy(B_d, B_h.data(), B_size, hipMemcpyHostToDevice);
+
+        hipEvent_t f_start, f_stop;
+        hipEventCreate(&f_start);
+        hipEventCreate(&f_stop);
+        hipEventRecord(f_start, 0);
+        //                                                                                                  m       n       k
+        hipLaunchKernelGGL(f, f_grid_dims, f_block_dims, 0, 0, A_d, B_d, alpha.data(), beta.data(), C_d_f, A_rows, B_cols, A_cols );
+        hipEventRecord(f_stop, 0);
+        hipEventSynchronize(f_stop);
+        float ms_f = 0.0;
+        // ignore first run
+        hipEventElapsedTime(&ms_f, f_start, f_stop);
+        if (i != 0) {
+            ms_f_total += ms_f;
+        }
+        hipEventDestroy(f_start);
+        hipEventDestroy(f_stop);
+
+        hipMemcpy(C_h_f.data(), C_d_f, C_size, hipMemcpyDeviceToHost);
+
+        if (print) {
+            print_matrix<__hip_bfloat16>(C_h_f.data(), A_rows, B_cols);
+        }
+
+        hipEvent_t g_start, g_stop;
+        hipEventCreate(&g_start);
+        hipEventCreate(&g_stop);
+        hipEventRecord(g_start, 0);
+        hipLaunchKernelGGL(g, g_grid_dims, g_block_dims, 0, 0, A_d, B_d, alpha.data(), beta.data(), C_d_g, A_rows, A_cols, B_cols);
+        hipEventRecord(g_stop, 0);
+        hipEventSynchronize(g_stop);
+        float ms_g = 0;
+        hipEventElapsedTime(&ms_g, g_start, g_stop);
+        if (i != 0) {
+            ms_g_total += ms_g;
+        }
+        hipEventDestroy(g_start);
+        hipEventDestroy(g_stop);
+
+        hipMemcpy(C_h_g.data(), C_d_g, C_size, hipMemcpyDeviceToHost);
+
+        if (print) {
+            print_matrix<__hip_bfloat16>(C_h_g.data(), A_rows, B_cols);
+        }
+
+        if (!matrices_are_equal<__hip_bfloat16>(C_h_f.data(), C_h_g.data(), A_rows, B_cols, A_rows, B_cols)) {
+
+            printf("kernel g is wrong \n");
+
+            for (int q = 0; q < A_rows; q++) {
+                for (int w = 0; w < B_cols; w++) {
+                    if (C_h_f[q * B_cols + w] != C_h_g[q * B_cols + w]) {
+                        printf("(%d, %d) F f: %f g: %f", q, w, (float) C_h_f[q * B_cols + w], (float) C_h_g[q * B_cols + w]);
+                        printf("F ");
+                    } else {
+                        printf("P ");
+                    }
+
+            }
+
+                    printf("\n");
+            }
+        }
+
+        printf("done \n");
+        hipFree(A_d); 
+        A_d = nullptr;
+        hipFree(B_d); 
+        B_d = nullptr;
+        hipFree(C_d_f); 
+        hipFree(C_d_g); 
+        C_d_f = nullptr;
+        C_d_g = nullptr;
+
+
+    }
+
+    float f_avg = ms_f_total/(float)runs;
+    float g_avg = ms_g_total/(float)runs;
+    
+    printf("f time %f g time %f \n", f_avg, g_avg);
+
+    return (g_avg - f_avg)/f_avg;
+} 
+float test_mfma(mat_mul_func f, int A_rows, int A_cols, int B_cols, dim3 grid_dims, dim3 block_dims, bool print) {
+    const size_t A_size = sizeof(__hip_fp8_e4m3_fnuz) * A_rows * A_cols;
+    const size_t B_size = sizeof(__hip_fp8_e4m3_fnuz) * A_cols * B_cols;
+    const size_t C_size = sizeof(__hip_bfloat16) * A_rows * B_cols;
+
+    int runs = 10;
+    float total_time = 0.0;
+    for (int i = 0; i < runs; i++) {
+        total_time += test_mat_mul_knl(f, A_rows, A_cols, B_cols, grid_dims, block_dims, false);         
+    }
+
+    return total_time/runs;
+//        std::vector<__hip_fp8_e4m3_fnuz> A_h = generate_random_vector<__hip_fp8_e4m3_fnuz>(A_rows, A_cols); // (size_A, 1.0f); 
+//        std::vector<__hip_fp8_e4m3_fnuz> B_h = generate_random_vector<__hip_fp8_e4m3_fnuz>(A_cols, B_cols);
+//        std::vector<__hip_bfloat16> C_h(A_rows * B_cols, (__hip_bfloat16) 0.0f);
+//        std::vector<__hip_bfloat16> C(A_rows * B_cols, (__hip_bfloat16) 0.0f);
+//        
+//        std::vector<__hip_fp8_e4m3_fnuz> alpha = generate_random_vector<__hip_fp8_e4m3_fnuz>(1, 1);
+//        std::vector<__hip_fp8_e4m3_fnuz> beta = generate_random_vector<__hip_fp8_e4m3_fnuz>(1, 1);
+//        
+//        print_matrix<__hip_fp8_e4m3_fnuz>(A_h.data(), A_rows, A_cols);
+//        printf("\n");
+//        printf("\n");
+//        print_matrix<__hip_fp8_e4m3_fnuz>(B_h.data(), A_cols, B_cols);
+//        printf("\n");
+//        printf("\n");
+//
+//        __hip_fp8_e4m3_fnuz *A_d, *B_d;
+//        __hip_bfloat16 *C_d;
+//        hipMalloc(&A_d, A_size) ;
+//        hipMalloc(&B_d, B_size);
+//        hipMalloc(&C_d, C_size);
+//
+//        hipMemcpy(A_d, A_h.data(), A_size, hipMemcpyHostToDevice);
+//        hipMemcpy(B_d, B_h.data(), B_size, hipMemcpyHostToDevice);
+//
+//        //dim3 block(16, 4);
+//        //dim3 grid(A_rows/4, B_cols/16);
+//        dim3 block(16, 4);
+//        dim3 grid(1, 1);
+//        hipLaunchKernelGGL(sgemm_16x16x4_e4m3, grid, block, 0, 0, A_d, B_d, C_d, A_rows, A_cols, B_cols);
+//        hipDeviceSynchronize();
+//
+//        hipMemcpy(C_h.data(), C_d, C_size, hipMemcpyDeviceToHost);
+//
+//        print_matrix<>(C_h.data(), A_rows, B_cols);
+//        mat_mul<__hip_fp8_e4m3_fnuz, __hip_bfloat16>(A_h.data(), B_h.data(), C.data(), A_rows, A_cols, B_cols);
+//
+//        printf("\n");
+//        printf("\n");
+//        print_matrix(C.data(), A_rows, B_cols);
+//        printf("\n");
+//        printf("\n");
+//
+//        //assert(matrices_are_equal(C.data(), C_h.data(), A_rows, B_cols, A_rows, B_cols));
+//        printf("done \n");
+//        hipFree(A_d); 
+//        A_d = nullptr;
+//        hipFree(B_d); 
+//        B_d = nullptr;
+//        hipFree(C_d); 
+//        C_d = nullptr;
+
 }
+
+int main() {
+//    float g_time = test_mfma(mat_mul_ref, 1600, 400, 1600, dim3(100, 100), dim3(16, 4), false);         
+//    float f_time = test_mfma(sgemm_16x16x4_e4m3, 1600, 400, 1600, dim3(100, 100), dim3(16, 4), false);         
+//    printf("%f \n", f_time);
+//    printf("%f \n", g_time);
+
+
+    int A_rows = 1024;
+    int A_cols = 1024;
+    int B_cols = 1024;
+
+    dim3 f_grid(A_rows/16, B_cols/16);
+    dim3 f_block(16, 16);
+
+    dim3 g_grid(A_rows/16, B_cols/16);
+    dim3 g_block(16, 4);
+
+    float t = compare_mat_mul_knls(mat_mul_ref, sgemm_16x16x4_e4m3, A_rows, A_cols, B_cols, f_grid, f_block, g_grid, g_block, false, 10);
+    printf(" delta %f \n", t);
+//    int A_rows = 32;
+//    int A_cols = 8;
+//    int B_cols = 32;
+//
+//    const size_t size_A = sizeof(float) * A_rows * A_cols;
+//    const size_t size_B = sizeof(float) * A_cols * B_cols;
+//    const size_t size_D = sizeof(float) * A_rows * B_cols;
+//
+//    for (int i = 0; i < 10; i++) {
+//    //    std::vector<float> h_A(size_A, 1.0f); 
+//        std::vector<float> h_A = generate_random_vector<float>(A_rows, A_cols); // (size_A, 1.0f); 
+//        std::vector<float> h_B = generate_random_vector<float>(A_cols, B_cols);
+//       // std::vector<float> h_D = generate_random_vector<float>(A_rows, B_cols);
+//        std::vector<float> h_D(size_D, 0.0f);
+//        std::vector<float> C(size_D, 0.0f);
+//        
+//        std::vector<float> alpha = generate_random_vector<float>(1, 1);
+//        std::vector<float> beta = generate_random_vector<float>(1, 1);
+//        
+//        print_matrix(h_A.data(), A_rows, A_cols);
+//        printf("\n");
+//        printf("\n");
+//        print_matrix(h_B.data(), A_cols, B_cols);
+//        printf("\n");
+//        printf("\n");
+//
+//        float *d_A, *d_B, *d_D;
+//        hipMalloc(&d_A, size_A * sizeof(float));
+//        hipMalloc(&d_B, size_B * sizeof(float));
+//        hipMalloc(&d_D, size_D * sizeof(float));
+//
+//        hipMemcpy(d_A, h_A.data(), size_A * sizeof(float), hipMemcpyHostToDevice);
+//        hipMemcpy(d_B, h_B.data(), size_B * sizeof(float), hipMemcpyHostToDevice);
+//
+//        //dim3 block(16, 4);
+//        //dim3 grid(A_rows/4, B_cols/16);
+//        dim3 block(16, 4);
+//        dim3 grid(2, 2);
+//        hipLaunchKernelGGL(custom_kernel, grid, block, 0, 0, d_A, d_B, alpha.data(), beta.data(),  d_D, A_rows, A_cols, B_cols);
+//        hipDeviceSynchronize();
+//
+//        hipMemcpy(h_D.data(), d_D, size_D * sizeof(float), hipMemcpyDeviceToHost);
+//
+//        print_matrix(h_D.data(), A_rows, B_cols);
+//        mat_mul(h_A.data(), h_B.data(), C.data(), A_rows, A_cols, B_cols);
+//
+//        printf("\n");
+//        printf("\n");
+//        print_matrix(C.data(), A_rows, B_cols);
+//        printf("\n");
+//        printf("\n");
+//
+//        assert(matrices_are_equal(C.data(), h_D.data(), A_rows, B_cols, A_rows, B_cols));
+//
+//        printf("done \n");
+//
+//        hipFree(d_A);
+//        hipFree(d_B);
+//        hipFree(d_D);
+//
+//    }
+//    return 0;
+}
+
 
