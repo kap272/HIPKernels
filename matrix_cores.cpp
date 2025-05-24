@@ -45,38 +45,32 @@ __global__ void mat_mul_ref(const __hip_fp8_e4m3_fnuz* a, const __hip_fp8_e4m3_f
         // before we can go to the next block, scale the result of the current block
         // and accumulate to final result
         // note the different indexing into as and bs
-//        result += block_result * as[cx + i/BLOCK * m] * bs[cy/BLOCK + i/BLOCK * sn];
-        result += block_result; 
+        result += block_result * as[cx + i/BLOCK * m] * bs[cy/BLOCK + i/BLOCK * sn];
+//        result += block_result; 
     }
 
     // finally, write the result as bf16
     c[cx * n + cy] = (__hip_bfloat16)result;
 }
 
-__global__ void sgemm_16x16x4(const float *A, const float *B, float *D)
-{
-  using float4 = __attribute__( (__vector_size__(K * sizeof(float)) )) float;
-  float4 dmn = {0};
- 
-  int mk = threadIdx.y + K * threadIdx.x;
-  int kn = threadIdx.x + N * threadIdx.y;
- 
-  float amk = A[mk];
-  float bkn = B[kn];
-  dmn = __builtin_amdgcn_mfma_f32_16x16x4f32(amk, bkn, dmn, 0, 0, 0);
- 
-  for (int i = 0; i < 4; ++i) {
-    const int idx = threadIdx.x + i * N + threadIdx.y * 4 * N;
-    D[idx] = dmn[i];
-  }
-}
 
-__device__ inline uint32_t pack_f8_f32(__hip_fp8_e4m3_fnuz a0, __hip_fp8_e4m3_fnuz a1, __hip_fp8_e4m3_fnuz a2, __hip_fp8_e4m3_fnuz a3) {
-    return (uint32_t(a3) << 24) |
-           (uint32_t(a2) << 16) |
-           (uint32_t(a1) << 8)  |
-           (uint32_t(a0));
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 __global__ void sgemm_16x16x4_e4m3(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8_e4m3_fnuz* B, const float* as, const float* bs, __hip_bfloat16* C, int A_rows, int A_cols, int B_cols) {
@@ -101,23 +95,31 @@ __global__ void sgemm_16x16x4_e4m3(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8
   int A_row = upper_left_y + lane_id%16;
   int B_row = upper_left_x + lane_id%16;
 
-  for (int i = 0; i < A_cols; i += 4) {
-      int A_col = (i) + lane_id/16;
-      int B_col =  A_col; // (i) + lane_id/16;
+  for (i = 0; i < A_cols; i++) {
+      for (ii = o; i < 128, ii++) {
+          for (int iii = 0; ii < A_cols; ii += 4) {
+              int A_col = (i) + lane_id/16;
+              int B_col =  A_col; // (i) + lane_id/16;
 
-      __hip_fp8_e4m3_fnuz A_val = A[A_row + A_col * A_rows]; 
-      __hip_fp8_e4m3_fnuz B_val = B[B_row + B_col * A_rows]; 
+                                           // blockDim.y*blockIdx.y*4 + i + lane_id/16 * A_rows
+              __hip_fp8_e4m3_fnuz A_val = A[A_row + A_col * A_rows]; 
+              float A_val = (float) A[A_row + A_col * A_rows]; 
+                                           // blockDim.y*blockIdx.y*4 + i + lane_id/16 * A_rows
+              __hip_fp8_e4m3_fnuz B_val = B[B_row + B_col * A_rows]; 
+              float B_val = (float) B[B_row + B_col * A_rows]; 
 
-      dmn = __builtin_amdgcn_mfma_f32_16x16x4f32(A_val, B_val, dmn, 0, 0, 0);
+              dmn = __builtin_amdgcn_mfma_f32_16x16x4f32(A_val, B_val, dmn, 0, 0, 0);
 
-      for (int p = 0; p < 4; ++p) {
-            // lane_id -> C[4 * lane_id/16 + i][lane_id % 16] for i = 0, 1, 2, 3
-            int C_row = upper_left_y + (4 * (lane_id/16)) + p;
-            int C_col = upper_left_x + (lane_id % 16);
+              for (int p = 0; p < 4; ++p) {
+                    // lane_id -> C[4 * lane_id/16 + i][lane_id % 16] for i = 0, 1, 2, 3
+                    int C_row = upper_left_y + (4 * (lane_id/16)) + p;
+                    int C_col = upper_left_x + (lane_id % 16);
 
-            C[C_row * B_cols + C_col] = (__hip_bfloat16) dmn[p];
+                    C[C_row * B_cols + C_col] = (__hip_bfloat16) dmn[p];
+                  }
           }
       }
+  }
 }
 
 __global__ void custom_kernel_bak(const float* A, const float* B, const float* as, const float* bs, float* C, int m, int n, int k) {
@@ -492,8 +494,8 @@ float compare_mat_mul_knls(mat_mul_func f, mat_mul_func g, int A_rows, int A_col
         std::vector<__hip_bfloat16> C_h_f(A_rows * B_cols, (__hip_bfloat16) 0.0f);
         std::vector<__hip_bfloat16> C_h_g(A_rows * B_cols, (__hip_bfloat16) 0.0f);
         
-        std::vector<float> alpha = generate_random_vector<float>(1, 1);
-        std::vector<float> beta = generate_random_vector<float>(1, 1);
+        std::vector<float> alpha = generate_random_vector<float>(A_rows, B_cols/128);
+        std::vector<float> beta = generate_random_vector<float>(A_cols/128, B_cols/128);
         
         if (print) {
             printf("A: \n");
