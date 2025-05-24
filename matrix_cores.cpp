@@ -95,16 +95,15 @@ __global__ void sgemm_16x16x4_e4m3(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8
   //                  lane_id -> B_T[lane_id//16][lane_id%16] or  
   //                  lane_id -> B[lane_id%16][lane_id//16]
                     
-  // TODO: use shared memory
-  __shared__ float A_tile[16][4];
-  __shared__ float B_tile[16][4];
+//  __shared__ __hip_fp8_e4m3_fnuz A_tile[16][4];
+//  __shared__ __hip_fp8_e4m3_fnuz B_tile[16][4];
   
   int A_row = upper_left_y + lane_id%16;
-  int B_row = upper_left_x+ lane_id%16;
+  int B_row = upper_left_x + lane_id%16;
 
   for (int i = 0; i < A_cols; i += 4) {
       int A_col = (i) + lane_id/16;
-      int B_col = (i) + lane_id/16;
+      int B_col =  A_col; // (i) + lane_id/16;
 
       __hip_fp8_e4m3_fnuz A_val = A[A_row + A_col * A_rows]; 
       __hip_fp8_e4m3_fnuz B_val = B[B_row + B_col * A_rows]; 

@@ -1,0 +1,6 @@
+A:     M-by-N            column major
+B:     N-by-K
+alpha: M-by-K//128
+beta:  N//128-by-K//128  
+C:     M-by-N            row major
+
