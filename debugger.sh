@@ -77,3 +77,5 @@ cp -r /root/rocm-gdb-build/ROCgdb/gdb/python/lib/gdb /root/rocm-gdb-build/ROCgdb
 
 sudo ln -sf "$(realpath ./gdb/gdb)" /usr/local/bin/rocgdb
 
+#/root/rocm-gdb-build/ROCgdb/build/gdb/gdb  --data-directory=/root/rocm-gdb-build/ROCgdb/build/gdb/data-directory
+

@@ -95,10 +95,10 @@ __global__ void sgemm_16x16x4_e4m3(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8
 
   int lane_id = (threadIdx.y * blockDim.x + threadIdx.x) % 64;
 
-  int blockDim_x = blockDim.x;
-  int blockIdx_x = blockIdx.x;
-  int blockDim_y = blockDim.y;
-  int blockIdx_y = blockIdx.y;
+//  int blockDim_x = blockDim.x;
+//  int blockIdx_x = blockIdx.x;
+//  int blockDim_y = blockDim.y;
+//  int blockIdx_y = blockIdx.y;
 
   // determine the upper left corner of the tiles in the input
   // ths is the offset against which to map lane id to matrix indices
@@ -668,8 +668,8 @@ int main() {
     //6144    4608    7168
 //    (1023, 700) F f: 48896.000000 g: 49408.000000F
     int A_rows = 1024;
-    int B_rows = 1600;
-    int B_cols = 7200;
+    int B_rows = 1024;
+    int B_cols = 1024;
 //    int B_rows = 1600;
 //    int B_cols = 7200;
     
