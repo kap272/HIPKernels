@@ -138,10 +138,7 @@ __global__ void sgemm_16x16x4_e4m3_bak(const __hip_fp8_e4m3_fnuz* A, const __hip
 
 __global__ void sgemm_16x16x4_e4m3(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8_e4m3_fnuz* B, const float* as, const float* bs, __hip_bfloat16* C, int A_rows, int B_rows, int B_cols) {
   using float4 = __attribute__( (__vector_size__(K * sizeof(float)) )) float;
-  float4 C_1 = {0};
-  float4 C_2 = {0};
-  float4 C_3 = {0};
-  float4 C_4 = {0};
+  float4 C_frags[4];
 
   int blockDim_x = blockDim.x;
   int blockIdx_x = blockIdx.x;
@@ -151,11 +148,8 @@ __global__ void sgemm_16x16x4_e4m3(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8
   int threadIdx_x =  threadIdx.x; 
 
   int thread_num =  threadIdx.y * blockDim.x + threadIdx.x;
-//   int lane_id = (threadIdx.y * blockDim.x + threadIdx.x) % 64;
-//   int wf_id = (threadIdx.y * blockDim.x + threadIdx.x) / 64;
   int lane_id = thread_num%64;
   int wf_id = thread_num/64;
-
 
   int upper_left_x = blockDim.x * blockIdx.x + 16 * (wf_id)%2;
   int upper_left_y = blockDim.y * blockIdx.y + 16 * (wf_id)/2;
@@ -175,11 +169,9 @@ __global__ void sgemm_16x16x4_e4m3(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8
 
   for (int i = 0; i < B_cols; i += 32) {
       // need to fill in the tiles
-      // each thread fills in a specific value 
+      // each thread fills in a 4 values in a column 
       int A_col = i + thread_num%32; 
-
       int B_col = A_col;
-
 
       for (int row = 0; row < 4; row ++) {
           int A_tile_row = (4 * (thread_num/32)) + row; 
@@ -191,11 +183,56 @@ __global__ void sgemm_16x16x4_e4m3(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8
           B_tile[A_tile_row][thread_num%32] = B[B_row + B_col * B_rows]; 
       }
 
-
       __syncthreads();
-      // atp in this block we have two tiles with values from A and B 
-      // we can take 16x4 subtiles of these tiles and call mfma
 
+      for (int subtile = 0; subtile < 8; subtile++) {
+        // depending on the wavefront, work on a different quadrant of the output tile
+        
+        // wf1 -> top row of A subtiles, top row of B subtiles
+        // wf2 -> top row of A subtiles, bottom row of B subtiles
+        // wf3 -> botom row of A subtiles, top roww of B subtiles
+        // wf4 -> bottom row of A subtiles, bottom roww of B subtiles
+        //
+        //
+        // wf mapping
+        // 0   - 63  -> 1
+        // 64  - 127 -> 2
+        // 128 - 192 -> 3
+        // 192 - 255 -> 4
+
+        // if wf_id = 0, need top subtiles of A
+        // first find an offset row and col - (r, c)
+        // wf -> (r, c) : (16 * (wf/2)  + upper_left_y , i + subtile * 4)
+        // l -> (l/%16, l/4) + (r, c)
+        // then map thread num to indices
+        // threads are batched in 
+        //
+        
+        int A_tile_row_offset = (16 * (wf_id/2)) + upper_left_y;
+        int A_tile_col_offset = i + subtile * 4; 
+
+        float A_val = (float) A_tile[A_tile_row_offset + lane_id%16][A_tile_col_offset + lane_id/4];
+
+        int B_tile_row_offset = (16 * ((wf_id%2) + 1)) + upper_left_x; 
+        int B_tile_col_offset = i + subtile * 4; 
+
+        float B_val = (float) B_tile[B_tile_row_offset + lane_id%16][A_tile_col_offset + lane_id/4];
+
+//         float A_val = (float) A_tile[((wf_id / 2) * 16) + lane_id/16][(subtile * 4) + lane_id%4];
+//         float B_val = (float) B_tile[(((wf_id + 1)% 2) * 16) + lane_id/16][(subtile * 4) +  lane_id%4];
+
+        C_frags[wf_id] = __builtin_amdgcn_mfma_f32_16x16x4f32((float) A_val, (float) B_val, C_frags[wf_id], 0, 0, 0);
+
+        for (int p = 0; p < 4; ++p) {
+            int C_row = upper_left_y + (4 * (lane_id/16)) + p + (16 * (wf_id/2) );
+            int C_col = upper_left_x + (lane_id % 16) + (16 * (wf_id%2));
+
+            if (C_row < A_rows && C_col < B_rows) {
+                C[C_row * B_rows + C_col] = (__hip_bfloat16) C_frags[wf_id][p];
+                }
+              }
+          }
+      
 //       if (i == 0 && lane_id == 0 && wf_id == 0 && thread_num == 0) {
 //           printf("A_tile \n");
 //           for (int q = 0; q < 32; q++) {
@@ -216,30 +253,12 @@ __global__ void sgemm_16x16x4_e4m3(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8
 //           }
 //       }
 
-      if ((A_row + A_col * A_rows) > A_rows * B_cols) {
-          printf("OOB on A row %d col %d\n", A_row, A_col);
-      }
-//       float B_val = (float) B[B_row + B_col * B_rows]; 
-      if ((B_row + B_col * B_rows) > B_rows * B_cols) {
-          printf("OOB on B row %d col %d\n", B_row, B_col);
-      }
-
-      dmn = __builtin_amdgcn_mfma_f32_16x16x4f32((float) 0, (float) 0, dmn, 0, 0, 0);
-
-      for (int p = 0; p < 4; ++p) {
-            // lane_id -> C[4 * lane_id/16 + i][lane_id % 16] for i = 0, 1, 2, 3
-            int C_row = upper_left_y + (4 * (lane_id/16)) + p;
-            int C_col = upper_left_x + (lane_id % 16);
-
-            if (C_row < A_rows && C_col < B_rows) {
-                C[C_row * B_rows + C_col] = (__hip_bfloat16) dmn[p];
-            }
-          }
       }
 }
 
 __global__ void custom_kernel_bak(const float* A, const float* B, const float* as, const float* bs, float* C, int m, int n, int k) {
     int cx = threadIdx.x + blockDim.x * blockIdx.x;
+    
     int cy = threadIdx.y + blockDim.y * blockIdx.y;
 
     int lane_id = (threadIdx.y * blockDim.x + threadIdx.x) % 64;
@@ -655,9 +674,9 @@ float compare_mat_mul_knls(mat_mul_func f, mat_mul_func g, int A_rows, int B_row
 
         hipMemcpy(C_h_f.data(), C_d_f, C_size, hipMemcpyDeviceToHost);
 
-//        if (print) {
-//            print_matrix<__hip_bfloat16>(C_h_f.data(), A_rows, B_cols);
-//        }
+       if (print) {
+           print_matrix<__hip_bfloat16>(C_h_f.data(), A_rows, B_cols);
+       }
 
         hipEvent_t g_start, g_stop;
         hipEventCreate(&g_start);
@@ -676,9 +695,9 @@ float compare_mat_mul_knls(mat_mul_func f, mat_mul_func g, int A_rows, int B_row
 
         hipMemcpy(C_h_g.data(), C_d_g, C_size, hipMemcpyDeviceToHost);
 
-//        if (print) {
-//            print_matrix<__hip_bfloat16>(C_h_g.data(), A_rows, B_cols);
-//        }
+       if (print) {
+           print_matrix<__hip_bfloat16>(C_h_g.data(), A_rows, B_cols);
+       }
 
         if (!matrices_are_equal<__hip_bfloat16>(C_h_f.data(), C_h_g.data(), A_rows, B_rows, A_rows, B_rows)) {
 
@@ -782,7 +801,11 @@ int main() {
     dim3 g_grid(B_rows/g_grid_len, A_rows/g_grid_len);
     dim3 g_block(g_grid_len, g_grid_len/4);
 
-    float t = compare_mat_mul_knls(mat_mul_ref, sgemm_16x16x4_e4m3, A_rows, B_rows, B_cols, f_grid, f_block, g_grid, g_block, true, 1);
+//     int g_grid_len = 16;
+//     dim3 g_grid(B_rows/g_grid_len, A_rows/g_grid_len);
+//     dim3 g_block(g_grid_len, g_grid_len/4);
+    float t = compare_mat_mul_knls(mat_mul_ref, sgemm_16x16x4_e4m3, A_rows, B_rows, B_cols, f_grid, f_block, g_grid, g_block, true, 5);
+   // float t = compare_mat_mul_knls(mat_mul_ref, sgemm_16x16x4_e4m3_bak, A_rows, B_rows, B_cols, f_grid, f_block, g_grid, g_block, false, 5);
     
     printf(" delta %f \n", t);
 }
