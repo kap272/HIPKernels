@@ -160,10 +160,8 @@ __global__ void sgemm_16x16x4_e4m3(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8
 
   __shared__  __align__(64)  __hip_fp8_e4m3_fnuz A_tile[32][32];
   __shared__ __align__(64) __hip_fp8_e4m3_fnuz B_tile[32][32];
-__shared__ int thread_id_map[32][32];
 
-  for (int i = 0; i < B_cols; i += 32) {
-
+   for (int i = 0; i < B_cols; i += 32) {
       int A_col = i + thread_num%32; 
       int B_col = A_col;
 
@@ -173,7 +171,6 @@ __shared__ int thread_id_map[32][32];
           int A_row = ((A_tile_row) + upper_left_y) ; 
           int B_row = ((A_tile_row) + upper_left_x) ; 
            
-          thread_id_map[A_tile_row][A_tile_col] = thread_num; 
           A_tile[A_tile_row][thread_num%32] = A[A_row + A_col * A_rows]; 
 //           if (A_tile_row == 8 && A_tile_col == 0 && i == 0 && blockIdx_x == 0 && blockIdx_y == 0) {
 //               assert(false);
@@ -183,7 +180,7 @@ __shared__ int thread_id_map[32][32];
 
           __syncthreads();
 
-            if (blockIdx_x == 0 && blockIdx_y == 0 && thread_num == 0 && i == 0) {
+//             if (blockIdx_x == 0 && blockIdx_y == 0 && thread_num == 0 && i == 0) {
 //                       printf("B tile \n");
 //                       for (int x = 0; x < 32; x++) {
 //                           for (int y = 0; y < 32; y++) {
@@ -213,9 +210,8 @@ __shared__ int thread_id_map[32][32];
 //                           printf("\n");
 //                       }
 
-                  }
 
-          __syncthreads();
+
 //             int col_offset   = (i * 4) + (subtile * 4);
       for (int subtile = 0; subtile < 8; subtile++) {
             int a_row_offset = 16 * (wf_id / 2);
@@ -228,6 +224,7 @@ __shared__ int thread_id_map[32][32];
           }
       }
 
+           __syncthreads();
     int row_offset = 16 * (wf_id / 2);
     int col_offset = 16 * (1 +( wf_id % 2));
 
@@ -238,7 +235,7 @@ __shared__ int thread_id_map[32][32];
         int C_col = upper_left_x + wf_col_offset + (lane_id % 16);
          
         if (C_row < A_rows && C_col < B_rows) {
-            C[C_row * B_cols + C_col] = (__hip_bfloat16) C_frags[wf_id][p];
+            C[C_row * B_rows + C_col] = (__hip_bfloat16) C_frags[wf_id][p];
         } else {
             printf("C row %d C col %d \n", C_row, C_col);
         }
@@ -698,49 +695,49 @@ float compare_mat_mul_knls(mat_mul_func f, mat_mul_func g, int A_rows, int B_row
         if (!matrices_are_equal<__hip_bfloat16>(C_h_f.data(), C_h_g.data(), A_rows, B_rows, A_rows, B_rows)) {
 
             printf("kernel g is wrong \n");
-//             float wrong = 0.0;
-//             float total = 0.0;
-//             float zero = 0.0;
-// 
-//             int zeros_found = 0;
-// 
-//             for (int q = 0; q < A_rows; q++) {
-//                 for (int w = 0; w < B_rows; w++) {
-//                     if (C_h_f[q * B_rows + w] != C_h_g[q * B_rows + w]) {
-//                         wrong += 1.0;
-//                         if (wrong < 10) {
-//                             printf("C with worng value row %d col %d f: %f g: %f \n", q, w, (float) C_h_f[q * B_rows + w], (float) C_h_g[q * B_rows + w]);
-//                         }
-//                         if ((float) C_h_g[q * B_rows + w] == 0.0) {
-//                             zero += 1;
-//                             zeros_found += 1;
-//                             if (zeros_found < 10) {
-//                                 printf("C with zero row %d col %d \n", q, w);
-//                             }
-//                         }
-//                     }
-//                     total += 1.0;
-//             }
-//             }
-//             
-//             printf("error rate: wrong: %f total: %f %f \n", wrong, total, wrong/total);
-//             printf("zero rate  %f \n", zero/total);
-// 
-//             if (print) {
-//                 for (int q = 0; q < A_rows; q++) {
-//                     for (int w = 0; w < B_rows; w++) {
-//                         if (C_h_f[q * B_cols + w] != C_h_g[q * B_cols + w]) {
-//                             printf("(%d, %d) F f: %f g: %f", q, w, (float) C_h_f[q * B_cols + w], (float) C_h_g[q * B_cols + w]);
-//                             printf("F ");
-//                         } else {
-//                             printf("P ");
-//                         }
-// 
-//                 }
-// 
-//                         printf("\n");
-//                 }
-//             }
+            float wrong = 0.0;
+            float total = 0.0;
+            float zero = 0.0;
+
+            int zeros_found = 0;
+
+            for (int q = 0; q < A_rows; q++) {
+                for (int w = 0; w < B_rows; w++) {
+                    if (C_h_f[q * B_rows + w] != C_h_g[q * B_rows + w]) {
+                        wrong += 1.0;
+                        if (wrong < 10000) {
+                            printf("C with worng value row %d col %d f: %f g: %f \n", q, w, (float) C_h_f[q * B_rows + w], (float) C_h_g[q * B_rows + w]);
+                        }
+                        if ((float) C_h_g[q * B_rows + w] == 0.0) {
+                            zero += 1;
+                            zeros_found += 1;
+                            if (zeros_found < 10) {
+                                printf("C with zero row %d col %d \n", q, w);
+                            }
+                        }
+                    }
+                    total += 1.0;
+            }
+            }
+            
+            printf("error rate: wrong: %f total: %f %f \n", wrong, total, wrong/total);
+            printf("zero rate  %f \n", zero/total);
+
+            if (print) {
+                for (int q = 0; q < A_rows; q++) {
+                    for (int w = 0; w < B_rows; w++) {
+                        if (C_h_f[q * B_cols + w] != C_h_g[q * B_cols + w]) {
+                            printf("(%d, %d) F f: %f g: %f", q, w, (float) C_h_f[q * B_cols + w], (float) C_h_g[q * B_cols + w]);
+                            printf("F ");
+                        } else {
+                            printf("P ");
+                        }
+
+                }
+
+                        printf("\n");
+                }
+            }
         }
         printf("done \n");
         hipFree(A_d); 
@@ -783,9 +780,9 @@ int main() {
     //
     //6144    4608    7168
 //    (1023, 700) F f: 48896.000000 g: 49408.000000F
-    int A_rows = 64;
-    int B_rows = 64;
-    int B_cols = 64;
+    int A_rows = 1024;
+    int B_rows = 1536;
+    int B_cols = 7168;
 //    int B_rows = 1600;
 //    int B_cols = 7200;
     
@@ -800,7 +797,7 @@ int main() {
 //     int g_grid_len = 16;
 //     dim3 g_grid(B_rows/g_grid_len, A_rows/g_grid_len);
 //     dim3 g_block(g_grid_len, g_grid_len/4);
-    float t = compare_mat_mul_knls(mat_mul_ref, sgemm_16x16x4_e4m3, A_rows, B_rows, B_cols, f_grid, f_block, g_grid, g_block, true, 0);
+    float t = compare_mat_mul_knls(mat_mul_ref, sgemm_16x16x4_e4m3, A_rows, B_rows, B_cols, f_grid, f_block, g_grid, g_block, false, 10);
    // float t = compare_mat_mul_knls(mat_mul_ref, sgemm_16x16x4_e4m3_bak, A_rows, B_rows, B_cols, f_grid, f_block, g_grid, g_block, false, 5);
     
     printf(" delta %f \n", t);
