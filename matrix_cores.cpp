@@ -152,14 +152,15 @@ __global__ void sgemm_16x16x4_e4m3(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8
   int wf_id = thread_num/64;
 
   int upper_left_x = blockDim.x * blockIdx.x ;
-  int upper_left_y = blockDim.y * blockIdx.y ;
+  int upper_left_y = 4*blockDim.y * blockIdx.y ;
 
   int A_row = (upper_left_y + lane_id%16);
   int B_row = upper_left_x + lane_id%16;
 
 
-  __shared__ __hip_fp8_e4m3_fnuz A_tile[32][32];
-  __shared__ __hip_fp8_e4m3_fnuz B_tile[32][32];
+  __shared__  __align__(64)  __hip_fp8_e4m3_fnuz A_tile[32][32];
+  __shared__ __align__(64) __hip_fp8_e4m3_fnuz B_tile[32][32];
+__shared__ int thread_id_map[32][32];
 
   for (int i = 0; i < B_cols; i += 32) {
 
@@ -169,15 +170,52 @@ __global__ void sgemm_16x16x4_e4m3(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8
       for (int row = 0; row < 4; row ++) {
           int A_tile_row = (4 * (thread_num/32)) + row; 
           int A_tile_col = thread_num%32; 
-          int A_row = ((A_tile_row) + upper_left_x) + i; 
-          int B_row = ((A_tile_row) + upper_left_x) + i; 
-            
+          int A_row = ((A_tile_row) + upper_left_y) ; 
+          int B_row = ((A_tile_row) + upper_left_x) ; 
+           
+          thread_id_map[A_tile_row][A_tile_col] = thread_num; 
           A_tile[A_tile_row][thread_num%32] = A[A_row + A_col * A_rows]; 
+//           if (A_tile_row == 8 && A_tile_col == 0 && i == 0 && blockIdx_x == 0 && blockIdx_y == 0) {
+//               assert(false);
+//           }
           B_tile[A_tile_row][thread_num%32] = B[B_row + B_col * B_rows]; 
       }
 
-      __syncthreads();
+          __syncthreads();
 
+            if (blockIdx_x == 0 && blockIdx_y == 0 && thread_num == 0 && i == 0) {
+//                       printf("B tile \n");
+//                       for (int x = 0; x < 32; x++) {
+//                           for (int y = 0; y < 32; y++) {
+//                             printf("%.1f ", (float) B_tile[x][y]);
+//                           }
+//                           printf("\n");
+//                       }
+//                       printf("B \n");
+//                       for (int x = upper_left_y; x < upper_left_y + 32; x++) {
+//                           for (int y = upper_left_x; y < upper_left_x + 32; y++) {
+//                             printf("%.1f ", (float) B[x + y * B_rows]);
+//                           }
+//                           printf("\n");
+//                       }
+//                       printf("A tile \n");
+//                       for (int x = 0; x < 32; x++) {
+//                           for (int y = 0; y < 32; y++) {
+//                             printf("%.1f ", (float) A_tile[x][y]);
+//                           }
+//                           printf("\n");
+//                       }
+//                       printf("A \n");
+//                       for (int x = upper_left_y; x < upper_left_y + 32; x++) {
+//                           for (int y = upper_left_x; y < upper_left_x + 32; y++) {
+//                             printf("%.1f ", (float) A[x + y * A_rows]);
+//                           }
+//                           printf("\n");
+//                       }
+
+                  }
+
+//           __syncthreads();
       for (int subtile = 0; subtile < 8; subtile++) {
             int a_row_offset = 16 * (wf_id / 2);
             int b_row_offset = 16 * (wf_id % 2);
@@ -630,6 +668,7 @@ float compare_mat_mul_knls(mat_mul_func f, mat_mul_func g, int A_rows, int B_row
         hipMemcpy(C_h_f.data(), C_d_f, C_size, hipMemcpyDeviceToHost);
 
        if (print) {
+           printf("C f \n");
            print_matrix<__hip_bfloat16>(C_h_f.data(), A_rows, B_cols);
        }
 
@@ -651,6 +690,7 @@ float compare_mat_mul_knls(mat_mul_func f, mat_mul_func g, int A_rows, int B_row
         hipMemcpy(C_h_g.data(), C_d_g, C_size, hipMemcpyDeviceToHost);
 
        if (print) {
+           printf("C g \n");
            print_matrix<__hip_bfloat16>(C_h_g.data(), A_rows, B_cols);
        }
 
@@ -742,9 +782,9 @@ int main() {
     //
     //6144    4608    7168
 //    (1023, 700) F f: 48896.000000 g: 49408.000000F
-    int A_rows = 32;
-    int B_rows = 32;
-    int B_cols = 32;
+    int A_rows = 64;
+    int B_rows = 64;
+    int B_cols = 64;
 //    int B_rows = 1600;
 //    int B_cols = 7200;
     
@@ -759,7 +799,7 @@ int main() {
 //     int g_grid_len = 16;
 //     dim3 g_grid(B_rows/g_grid_len, A_rows/g_grid_len);
 //     dim3 g_block(g_grid_len, g_grid_len/4);
-    float t = compare_mat_mul_knls(mat_mul_ref, sgemm_16x16x4_e4m3, A_rows, B_rows, B_cols, f_grid, f_block, g_grid, g_block, false, 10);
+    float t = compare_mat_mul_knls(mat_mul_ref, sgemm_16x16x4_e4m3, A_rows, B_rows, B_cols, f_grid, f_block, g_grid, g_block, true, 0);
    // float t = compare_mat_mul_knls(mat_mul_ref, sgemm_16x16x4_e4m3_bak, A_rows, B_rows, B_cols, f_grid, f_block, g_grid, g_block, false, 5);
     
     printf(" delta %f \n", t);
