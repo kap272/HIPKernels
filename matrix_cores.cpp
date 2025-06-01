@@ -191,6 +191,7 @@ __global__ void sgemm_16x16x4_e4m3(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8
             float A_val = (float) A_tile[a_row_offset + lane_id % 16][col_offset + lane_id / 16];
             float B_val = (float) B_tile[b_row_offset + lane_id % 16][col_offset + lane_id /16];
 
+            // TODO: factor out scaling and using SMEM
             float a = alpha[a_row_offset + lane_id % 16 + upper_left_y + i/128 * A_rows];
             float b = beta[(b_row_offset + lane_id % 16 + upper_left_x)/128 + i/128 * sn];
 
