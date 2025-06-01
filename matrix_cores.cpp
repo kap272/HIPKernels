@@ -99,11 +99,6 @@ __global__ void sgemm_16x16x4_e4m3_bak(const __hip_fp8_e4m3_fnuz* A, const __hip
 
   int lane_id = (threadIdx.y * blockDim.x + threadIdx.x) % 64;
 
-//  int blockDim_x = blockDim.x;
-//  int blockIdx_x = blockIdx.x;
-//  int blockDim_y = blockDim.y;
-//  int blockIdx_y = blockIdx.y;
-
   // determine the upper left corner of the tiles in the input
   // ths is the offset against which to map lane id to matrix indices
   int upper_left_x = blockDim.x * blockIdx.x;
@@ -142,51 +137,43 @@ __global__ void sgemm_16x16x4_e4m3_bak(const __hip_fp8_e4m3_fnuz* A, const __hip
 }
 
 __global__ void sgemm_16x16x4_e4m3(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8_e4m3_fnuz* B, const float* alpha, const float* beta, __hip_bfloat16* C, int A_rows, int B_rows, int B_cols) {
-  using float4 = __attribute__( (__vector_size__(K * sizeof(float)) )) float;
-  float4 C_frags[4] = {0.0f, 0.0f, 0.0f, 0.0f} ;
+    using float4 = __attribute__( (__vector_size__(K * sizeof(float)) )) float;
+    float4 C_frags[4] = {0.0f, 0.0f, 0.0f, 0.0f} ;
 
-//   int blockDim_x = blockDim.x;
-//   int blockIdx_x = blockIdx.x;
-//   int blockDim_y = blockDim.y;
-//   int blockIdx_y = blockIdx.y;
-//   int threadIdx_y =  threadIdx.y ;
-//   int threadIdx_x =  threadIdx.x; 
-//
-//
+    int thread_num =  threadIdx.y * blockDim.x + threadIdx.x;
+    int lane_id = thread_num%64;
+    int wf_id = thread_num/64;
 
-  int thread_num =  threadIdx.y * blockDim.x + threadIdx.x;
-  int lane_id = thread_num%64;
-  int wf_id = thread_num/64;
+    int upper_left_x = blockDim.x * blockIdx.x ;
+    int upper_left_y = 4*blockDim.y * blockIdx.y ;
 
-  int upper_left_x = blockDim.x * blockIdx.x ;
-  int upper_left_y = 4*blockDim.y * blockIdx.y ;
+    int A_row = (upper_left_y + lane_id%16);
+    int B_row = upper_left_x + lane_id%16;
 
-  int A_row = (upper_left_y + lane_id%16);
-  int B_row = upper_left_x + lane_id%16;
-
-  int sn = (B_rows + 128 - 1)/128;
+    int sn = (B_rows + 128 - 1)/128;
 
 
-  __shared__  __hip_fp8_e4m3_fnuz A_tile[32][32];
-  __shared__ __hip_fp8_e4m3_fnuz B_tile[32][32];
+    __shared__  __hip_fp8_e4m3_fnuz A_tile[32][32];
+    __shared__ __hip_fp8_e4m3_fnuz B_tile[32][32];
 
-   for (int i = 0; i < B_cols; i += 32) {
-      int A_col = i + thread_num%32; 
-      int B_col = A_col;
+    for (int i = 0; i < B_cols; i += 32) {
+        int A_col = i + thread_num%32; 
+        int B_col = A_col;
 
-      for (int row = 0; row < 4; row ++) {
-          int A_tile_row = (4 * (thread_num/32)) + row; 
-          int A_tile_col = thread_num%32; 
-          int A_row = ((A_tile_row) + upper_left_y) ; 
-          int B_row = ((A_tile_row) + upper_left_x) ; 
-           
-          A_tile[A_tile_row][thread_num%32] = A[A_row + A_col * A_rows]; 
-          B_tile[A_tile_row][thread_num%32] = B[B_row + B_col * B_rows]; 
-      }
+        for (int row = 0; row < 4; row ++) {
+            int A_tile_row = (4 * (thread_num/32)) + row; 
+            int A_tile_col = thread_num%32; 
+            int A_row = ((A_tile_row) + upper_left_y) ; 
+            int B_row = ((A_tile_row) + upper_left_x) ; 
 
-          __syncthreads();
+            A_tile[A_tile_row][thread_num%32] = A[A_row + A_col * A_rows]; 
+            B_tile[A_tile_row][thread_num%32] = B[B_row + B_col * B_rows]; 
+        
+        }
 
-      for (int subtile = 0; subtile < 8; subtile++) {
+        __syncthreads();
+
+        for (int subtile = 0; subtile < 8; subtile++) {
             int a_row_offset = 16 * (wf_id / 2);
             int b_row_offset = 16 * (wf_id % 2);
             int col_offset   =  (subtile * 4);
@@ -204,33 +191,25 @@ __global__ void sgemm_16x16x4_e4m3(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8
             float A_val = (float) A_tile[a_row_offset + lane_id % 16][col_offset + lane_id / 16];
             float B_val = (float) B_tile[b_row_offset + lane_id % 16][col_offset + lane_id /16];
 
-//             if (i == 128 &&  a_row_offset + lane_id % 16 + upper_left_x ) {
-// 
-//             } 
-//
             float a = alpha[a_row_offset + lane_id % 16 + upper_left_y + i/128 * A_rows];
             float b = beta[(b_row_offset + lane_id % 16 + upper_left_x)/128 + i/128 * sn];
-            //
-            //qint sn = (n + BLOCK - 1) / BLOCK;
-            //result += block_result * as[cx + i/BLOCK * m] * bs[cy/BLOCK + i/BLOCK * sn];
+
             C_frags[wf_id] = __builtin_amdgcn_mfma_f32_16x16x4f32((float) a * A_val, (float) b * B_val, C_frags[wf_id], 0, 0, 0);
           }
 
           __syncthreads();
-      }
-
-//     int row_offset = 16 * (wf_id / 2);
-//     int col_offset = 16 * (1 +( wf_id % 2));
+        
+    }
 
     for (int p = 0; p < 4; ++p) {
         int wf_row_offset = 16 * (wf_id / 2);
         int wf_col_offset = 16 * (wf_id % 2);
         int C_row = upper_left_y + wf_row_offset + (4 * (lane_id / 16)) + p;
         int C_col = upper_left_x + wf_col_offset + (lane_id % 16);
+
         if (C_row < A_rows && C_col < B_rows && wf_id < 4 && p < 4) {
             C[C_row * B_rows + C_col] = (__hip_bfloat16) C_frags[wf_id][p];
         }
-
     }
 }
 
