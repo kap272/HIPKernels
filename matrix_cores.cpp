@@ -215,11 +215,12 @@ __shared__ int thread_id_map[32][32];
 
                   }
 
-//           __syncthreads();
+          __syncthreads();
+//             int col_offset   = (i * 4) + (subtile * 4);
       for (int subtile = 0; subtile < 8; subtile++) {
             int a_row_offset = 16 * (wf_id / 2);
             int b_row_offset = 16 * (wf_id % 2);
-            int col_offset   = (i * 4) + (subtile * 4);
+            int col_offset   =  (subtile * 4);
 
             float A_val = (float) A_tile[a_row_offset + lane_id % 16][col_offset + lane_id / 16];
             float B_val = (float) B_tile[b_row_offset + lane_id % 16][col_offset + lane_id /16];
