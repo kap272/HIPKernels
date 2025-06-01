@@ -156,6 +156,9 @@ __global__ void sgemm_16x16x4_e4m3(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8
     __shared__  __hip_fp8_e4m3_fnuz A_tile[32][32];
     __shared__ __hip_fp8_e4m3_fnuz B_tile[32][32];
 
+    float a ;
+    float b;
+
     for (int i = 0; i < B_cols; i += 32) {
         int A_col = i + thread_num%32; 
         int B_col = A_col;
@@ -191,9 +194,10 @@ __global__ void sgemm_16x16x4_e4m3(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8
             float A_val = (float) A_tile[a_row_offset + lane_id % 16][col_offset + lane_id / 16];
             float B_val = (float) B_tile[b_row_offset + lane_id % 16][col_offset + lane_id /16];
 
-            // TODO: factor out scaling and using SMEM
-            float a = alpha[a_row_offset + lane_id % 16 + upper_left_y + i/128 * A_rows];
-            float b = beta[(b_row_offset + lane_id % 16 + upper_left_x)/128 + i/128 * sn];
+//             if (i%128 == 0) {
+                float a = alpha[a_row_offset + lane_id % 16 + upper_left_y + i/128 * A_rows];
+                float b = beta[(b_row_offset + lane_id % 16 + upper_left_x)/128 + i/128 * sn];
+//             }
 
             C_frags[wf_id] = __builtin_amdgcn_mfma_f32_16x16x4f32((float) a * A_val, (float) b * B_val, C_frags[wf_id], 0, 0, 0);
           }
