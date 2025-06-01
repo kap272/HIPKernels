@@ -136,8 +136,8 @@ __global__ void sgemm_16x16x4_e4m3_bak(const __hip_fp8_e4m3_fnuz* A, const __hip
       }
 }
 
-__global__ void sgemm_16x16x4_e4m3(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8_e4m3_fnuz* B, const float* alpha, const float* beta, __hip_bfloat16* C, int A_rows, int B_rows, int B_cols) {
-    using float4 = __attribute__( (__vector_size__(K * sizeof(float)) )) float;
+__global__ void custom_kernel(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8_e4m3_fnuz* B, const float* alpha, const float* beta, __hip_bfloat16* C, int A_rows, int B_rows, int B_cols) {
+    using float4 = __attribute__( (__vector_size__(4 * sizeof(float)) )) float;
     float4 C_frags[4] = {0.0f, 0.0f, 0.0f, 0.0f} ;
 
     int thread_num =  threadIdx.y * blockDim.x + threadIdx.x;
@@ -156,8 +156,8 @@ __global__ void sgemm_16x16x4_e4m3(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8
     __shared__  __hip_fp8_e4m3_fnuz A_tile[32][32];
     __shared__ __hip_fp8_e4m3_fnuz B_tile[32][32];
 
-    float a ;
-    float b;
+    float a  = 1.0;
+    float b = 1.0;
 
     for (int i = 0; i < B_cols; i += 32) {
         int A_col = i + thread_num%32; 
@@ -194,10 +194,10 @@ __global__ void sgemm_16x16x4_e4m3(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8
             float A_val = (float) A_tile[a_row_offset + lane_id % 16][col_offset + lane_id / 16];
             float B_val = (float) B_tile[b_row_offset + lane_id % 16][col_offset + lane_id /16];
 
-//             if (i%128 == 0) {
-                float a = alpha[a_row_offset + lane_id % 16 + upper_left_y + i/128 * A_rows];
-                float b = beta[(b_row_offset + lane_id % 16 + upper_left_x)/128 + i/128 * sn];
-//             }
+            if (i%128 == 0) {
+                 a = alpha[a_row_offset + lane_id % 16 + upper_left_y + i/128 * A_rows];
+                 b = beta[(b_row_offset + lane_id % 16 + upper_left_x)/128 + i/128 * sn];
+            }
 
             C_frags[wf_id] = __builtin_amdgcn_mfma_f32_16x16x4f32((float) a * A_val, (float) b * B_val, C_frags[wf_id], 0, 0, 0);
           }
@@ -382,7 +382,7 @@ __global__ void custom_kernel_bak_bak(const float* A, const float* B, const floa
 //}
 
 
-__global__ void custom_kernel(const float* A, const float* B, const float* as, const float* bs, float* C, int m, int n, int k) {
+__global__ void custom_kernel_old_old_old_old(const float* A, const float* B, const float* as, const float* bs, float* C, int m, int n, int k) {
     int cx = threadIdx.x + blockDim.x * blockIdx.x;
     int cy = threadIdx.y + blockDim.y * blockIdx.y;
 
@@ -551,7 +551,7 @@ float test_mat_mul_knl(mat_mul_func f, int A_rows, int A_cols, int B_cols, dim3 
     hipEventCreate(&start);
     hipEventCreate(&stop);
     hipEventRecord(start, 0);
-    hipLaunchKernelGGL(sgemm_16x16x4_e4m3, grid_dims, block_dims, 0, 0, A_d, B_d, alpha.data(), beta.data(), C_d, A_rows, A_cols, B_cols);
+    hipLaunchKernelGGL(custom_kernel, grid_dims, block_dims, 0, 0, A_d, B_d, alpha.data(), beta.data(), C_d, A_rows, A_cols, B_cols);
     hipEventRecord(stop, 0);
     hipEventSynchronize(stop);
     float ms = 0;
@@ -801,7 +801,7 @@ int main() {
 //     int g_grid_len = 16;
 //     dim3 g_grid(B_rows/g_grid_len, A_rows/g_grid_len);
 //     dim3 g_block(g_grid_len, g_grid_len/4);
-    float t = compare_mat_mul_knls(mat_mul_ref, sgemm_16x16x4_e4m3, A_rows, B_rows, B_cols, f_grid, f_block, g_grid, g_block, false, 10);
+    float t = compare_mat_mul_knls(mat_mul_ref, custom_kernel, A_rows, B_rows, B_cols, f_grid, f_block, g_grid, g_block, false, 10);
    // float t = compare_mat_mul_knls(mat_mul_ref, sgemm_16x16x4_e4m3_bak, A_rows, B_rows, B_cols, f_grid, f_block, g_grid, g_block, false, 5);
     
     printf(" delta %f \n", t);
