@@ -1,24 +1,26 @@
 #include<assert.h>
-#include<stdio.h>
-#ifdef __HIPCC__
+#include <cstddef>  // for std::size_t
+#include <array>
 #include <hip/amd_detail/amd_hip_fp8.h>
 #include <hip/amd_detail/amd_hip_bf16.h>
 #include <hip/hip_runtime.h>
-#endif
+#include<assert.h>
+#include<stdio.h>
 
+constexpr const int BLOCK = 128;
+constexpr const int TILE_WIDTH = 16;
+constexpr const int TILES_PER_BLOCK = BLOCK/TILE_WIDTH;
 
+// // get C_ij where
+// // C := A @ B_T
+// // C_ij = A_row_i * B_T_col_j
+// //      = A_row_i * B_row_j
+// // A m by k
+// // B n by k
+// // both column major format
+// float get_cell_value(float* A, float* B, int m, int k, int n) {
 
-// get C_ij where
-// C := A @ B_T
-// C_ij = A_row_i * B_T_col_j
-//      = A_row_i * B_row_j
-// A m by k
-// B n by k
-// both column major format
-float get_cell_value(float* A, float* B, int m, int k, int n) {
-
-} 
-
+// } 
 
 float* generate_random_vector(int n) {
     float* vec = (float*) malloc(sizeof(float) * n); 
@@ -28,18 +30,28 @@ float* generate_random_vector(int n) {
     return vec;
 }
 
-float* allocate_matrix(int rows, int cols) {
-    float* vec = (float*) malloc(sizeof(float) * rows * cols); 
-    return vec;
+template<typename T> T* generate_random_matrix(int rows, int cols) {
+    T* A = (T*) malloc(sizeof(T) * rows * cols);
+    for (int i = 0; i < rows; i++) {
+        for (int j = 0; j < cols; j++) {
+            A[i * cols + j] = (T) rand(); //% (__hip_fp8_e4m3_fnuz) 10.0;
+        }
+    }
+    return A;
 }
 
-float* generate_random_matrix(int rows, int cols) {
-    float* M = (float*) malloc(sizeof(float) * rows * cols); 
-    for (int i = 0; i < rows * cols; i++) {
-        M[i] = rand() % 10;
-    }
-    return M;
+// __hip_fp8_e4m3_fnuz* generate_random_matrix(int rows, int cols) {
+//     __hip_fp8_e4m3_fnuz* A = (__hip_fp8_e4m3_fnuz*) malloc(sizeof(__hip_fp8_e4m3_fnuz) * rows * cols);
+//     for (int i = 0; i < rows; i++) {
+//         for (int j = 0; j < cols; j++) {
+//             A[i * cols + j] = (__hip_fp8_e4m3_fnuz) rand(); //% (__hip_fp8_e4m3_fnuz) 10.0;
+//         }
+//     }
+//     return A;
+// }
 
+template<typename T> T* allocate_matrix(int rows, int cols) {
+    return (T*) malloc(sizeof(__hip_fp8_e4m3_fnuz) * rows * cols);
 }
 
 void print_vector(float* v, int n) {
@@ -59,7 +71,7 @@ void print_matrix(float* M, int rows, int cols) {
     printf("\n");
 }
 
-bool matrices_are_equal(float* A, float *B, int A_rows, int A_cols, int B_rows, int B_cols) {
+template<typename T> bool matrices_are_equal(T* A, T *B, int A_rows, int A_cols, int B_rows, int B_cols) {
     if (A_rows != B_rows || A_cols != B_cols) {
         return false;
     }
@@ -90,46 +102,47 @@ void mat_mul(float* A, float* B, float* C, int A_rows, int A_cols, int B_cols) {
 }
 
 
-typedef void (*mat_mul_func)(const float* a, const float* b, const float* as, const float* bs, float* c, int m, int n, int k); 
+typedef void (*mat_mul_func)(const __hip_fp8_e4m3_fnuz* a, const __hip_fp8_e4m3_fnuz* b, const float* as, const float* bs, __hip_bfloat16* c, int m, int n, int k); 
 
-void cudaMalloc_wrapped(float* addr, int size) {
-
-}
-
-void cudaMemcpy_wrapped(float* addr, int size) {
+void hipMalloc_wrapped(float* addr, int size) {
 
 }
 
-void cudaDeviceSynchronize_wrapped() {
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        fprintf(stderr, "Kernel launch failed: %s\n", cudaGetErrorString(err));
+void hipMemcpy_wrapped(float* addr, int size) {
+
+}
+
+void hipDeviceSynchronize_wrapped() {
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        fprintf(stderr, "Kernel launch failed: %s\n", hipGetErrorString(err));
         exit(EXIT_FAILURE);
     }
 
-    err = cudaDeviceSynchronize();
-    if (err != cudaSuccess) {
-        fprintf(stderr, "Kernel execution failed: %s\n", cudaGetErrorString(err));
+    err = hipDeviceSynchronize();
+    if (err != hipSuccess) {
+        fprintf(stderr, "Kernel execution failed: %s\n", hipGetErrorString(err));
         exit(EXIT_FAILURE);
     }
 }
 
 float compare_mat_mul_kernels(mat_mul_func f, mat_mul_func g, int m, int k, int n, bool print_results, dim3 f_grid_dims, dim3 f_block_dims, dim3 g_grid_dims, dim3 g_block_dims) {
-    // A m-by-k matrix in column major format
-    // B k-by-n matrix in column major format (repressented as a n-by-k)
-    // C m-by-n matrix in row major format
-    int A_size = sizeof(float) * m * k;
-    int B_size = sizeof(float) * n * k;
-    int C_size = sizeof(float) * m * n;
+    // // A m-by-k matrix in column major format
+    // // B k-by-n matrix in column major format (repressented as a n-by-k)
+    // // C m-by-n matrix in row major format
+    printf("starting test\n");
+    int A_size = sizeof(__hip_fp8_e4m3_fnuz) * m * k;
+    int B_size = sizeof(__hip_fp8_e4m3_fnuz) * n * k;
+    int C_size = sizeof(__hip_bfloat16) * m * n;
     int alpha_size = sizeof(float) * m * k/128;
     int beta_size = sizeof(float) * n * k/128;
 
-    float* A = generate_random_matrix(m, k); 
-    float* B = generate_random_matrix(n, k); 
+    __hip_fp8_e4m3_fnuz* A = generate_random_matrix<__hip_fp8_e4m3_fnuz>(m, k); 
+    __hip_fp8_e4m3_fnuz* B = generate_random_matrix<__hip_fp8_e4m3_fnuz>(n, k); 
 
 
-    float* alpha = generate_random_matrix(m, k/128);
-    float* beta = generate_random_matrix(n, k/128);
+    __hip_fp8_e4m3_fnuz* alpha = generate_random_matrix<__hip_fp8_e4m3_fnuz>(m, k/128);
+    __hip_fp8_e4m3_fnuz* beta = generate_random_matrix<__hip_fp8_e4m3_fnuz>(n, k/128);
 
 
     // establish ground truth
@@ -137,64 +150,64 @@ float compare_mat_mul_kernels(mat_mul_func f, mat_mul_func g, int m, int k, int 
     // print_matrix(B, A_cols, B_cols);
 
     // run kernel f
-    float* C_h_f = allocate_matrix(m, n);
+    __hip_bfloat16* C_h_f = allocate_matrix<__hip_bfloat16>(m, n);
 
-    float* A_d;
-    float* B_d;
+    __hip_fp8_e4m3_fnuz* A_d;
+    __hip_fp8_e4m3_fnuz* B_d;
     float* alpha_d;
     float* beta_d;
-    float* C_d_f = allocate_matrix(m, n);
+    __hip_bfloat16* C_d_f = allocate_matrix<__hip_bfloat16>(m, n);
 
-    cudaMalloc(&A_d, A_size);
-    cudaMalloc(&B_d, B_size); 
-    cudaMalloc(&C_d_f, C_size); 
-    cudaMalloc(&alpha_d, alpha_size); 
-    cudaMalloc(&beta_d, beta_size); 
+    hipMalloc(&A_d, A_size);
+    hipMalloc(&B_d, B_size); 
+    hipMalloc(&C_d_f, C_size); 
+    hipMalloc(&alpha_d, alpha_size); 
+    hipMalloc(&beta_d, beta_size); 
 
-    cudaMemcpy(A_d, A, A_size, cudaMemcpyHostToDevice); 
-    cudaMemcpy(B_d, B, B_size, cudaMemcpyHostToDevice); 
-    cudaMemcpy(alpha_d, alpha, alpha_size, cudaMemcpyHostToDevice); 
-    cudaMemcpy(beta_d, beta, beta_size, cudaMemcpyHostToDevice); 
+    hipMemcpy(A_d, A, A_size, hipMemcpyHostToDevice); 
+    hipMemcpy(B_d, B, B_size, hipMemcpyHostToDevice); 
+    hipMemcpy(alpha_d, alpha, alpha_size, hipMemcpyHostToDevice); 
+    hipMemcpy(beta_d, beta, beta_size, hipMemcpyHostToDevice); 
 
     float f_time;
-    cudaEvent_t f_start, f_stop;    
-    cudaEventCreate(&f_start);
-    cudaEventCreate(&f_stop);
-    cudaEventRecord(f_start, 0);
+    hipEvent_t f_start, f_stop;    
+    hipEventCreate(&f_start);
+    hipEventCreate(&f_stop);
+    hipEventRecord(f_start, 0);
 
     // TODO: a better way to determine kernel launch dimensions
     f<<<f_grid_dims, f_block_dims>>>(A_d, B_d, alpha_d, beta_d, C_d_f, m, n, k);
     
-    cudaEventRecord(f_stop, 0);
-    cudaDeviceSynchronize_wrapped();
-    cudaEventElapsedTime(&f_time, f_start, f_stop);
+    hipEventRecord(f_stop, 0);
+    hipDeviceSynchronize_wrapped();
+    hipEventElapsedTime(&f_time, f_start, f_stop);
 
-    cudaMemcpy(C_h_f, C_d_f, C_size, cudaMemcpyDeviceToHost); 
-    cudaFree(C_d_f);
+    hipMemcpy(C_h_f, C_d_f, C_size, hipMemcpyDeviceToHost); 
+    hipFree(C_d_f);
 
     // then knl g
-    float* C_h_g = (float*) malloc(sizeof(float) * m * n); 
-    float* C_d_g = (float*) malloc(sizeof(float) * m  * n); 
+    __hip_bfloat16* C_h_g = (__hip_bfloat16*) malloc(sizeof(__hip_fp8_e4m3_fnuz) * m * n); 
+    __hip_bfloat16* C_d_g = (__hip_bfloat16*) malloc(sizeof(__hip_fp8_e4m3_fnuz) * m  * n); 
     printf("%p %p \n", &C_h_g, &C_h_f); //0x7ffeee88cf78 0x7ffeee88cf38
-    cudaMalloc(&C_d_g, C_size);
+    hipMalloc(&C_d_g, C_size);
 
     // TODO fix timing
     float g_time;
-    cudaEvent_t g_start, g_stop;    
-    cudaEventCreate(&g_start);
-    cudaEventCreate(&g_stop);
-    cudaEventRecord(g_start, 0);
+    hipEvent_t g_start, g_stop;    
+    hipEventCreate(&g_start);
+    hipEventCreate(&g_stop);
+    hipEventRecord(g_start, 0);
 
     // TODO: a better way to determine kernel launch dimensions
     g<<<g_grid_dims, g_block_dims>>>(A_d, B_d, alpha_d, beta_d, C_d_g, m, n, k);
 
-    cudaEventRecord(g_stop, 0);
-    cudaDeviceSynchronize_wrapped();
-    cudaEventElapsedTime(&g_time, g_start, g_stop);
+    hipEventRecord(g_stop, 0);
+    hipDeviceSynchronize_wrapped();
+    hipEventElapsedTime(&g_time, g_start, g_stop);
 
-    cudaMemcpy(C_h_g, C_d_g, C_size, cudaMemcpyDeviceToHost); 
+    hipMemcpy(C_h_g, C_d_g, C_size, hipMemcpyDeviceToHost); 
 
-    if (matrices_are_equal(C_h_f, C_h_g, m, n, m, n)) {
+    if (matrices_are_equal<__hip_bfloat16>(C_h_f, C_h_g, m, n, m, n)) {
         printf("results match \n");
     } else {
         printf("results dont match \n");
@@ -204,7 +217,7 @@ float compare_mat_mul_kernels(mat_mul_func f, mat_mul_func g, int m, int k, int 
     if (!matrices_are_equal(C_h_f, C_h_g, m, n, m, n)) {
         printf("kernel g is wrong!\n");
     }
-    cudaFree(C_d_g);
+    hipFree(C_d_g);
     if (print_results) {
         int R = 0;
         printf("g result: \n");
@@ -225,7 +238,6 @@ float compare_mat_mul_kernels(mat_mul_func f, mat_mul_func g, int m, int k, int 
             printf("\n");
         }
 
-
         int miss = 0;
         int total = 0;
         int zero = 0;
@@ -233,7 +245,7 @@ float compare_mat_mul_kernels(mat_mul_func f, mat_mul_func g, int m, int k, int 
             for (int col = 0; col < n; col++) {
                 if (C_h_f[row * n + col] != C_h_g[row * n + col]) {
                    miss += 1; 
-                   if (C_h_g[row * n + col] == 0.0) {
+                   if (C_h_g[row * n + col] == (__hip_fp8_e4m3_fnuz) 0.0) {
                        zero += 1;
                    }
                 }
@@ -247,51 +259,51 @@ float compare_mat_mul_kernels(mat_mul_func f, mat_mul_func g, int m, int k, int 
 
     printf("kernel f run time: %f\n", f_time);
     printf("kernel g run time: %f\n", g_time);
-    cudaFree(A_d);
-    cudaFree(B_d);
-    free(A);
-    free(B);
+
+    // hipFree(A_d);
+    // hipFree(B_d);
+    // free(A);
+    // free(B);
+    // free(C_h_f);
+    // free(C_h_g);
 
     return ((g_time - f_time)/f_time);
 }
-constexpr const int BLOCK = 128;
-constexpr const int TILE_WIDTH = 16;
-constexpr const int TILES_PER_BLOCK = BLOCK/TILE_WIDTH;
 
-// A, B, C, as, bs, C, m, n, k
-__global__ void mat_mul_ref(const float* a, const float* b, const float* as, const float* bs, float* c, int m, int n, int k) {
+// // A, B, C, as, bs, C, m, n, k
+// // __global__ void mat_mul_ref(const float* a, const float* b, const float* as, const float* bs, float* c, int m, int n, int k) {
                    
-    // Your implementation here
-    int cx = threadIdx.x + blockDim.x * blockIdx.x;
-    int cy = threadIdx.y + blockDim.y * blockIdx.y;
-    if(cx >= m || cy >= n) return;
+// //     // Your implementation here
+// //     int cx = threadIdx.x + blockDim.x * blockIdx.x;
+// //     int cy = threadIdx.y + blockDim.y * blockIdx.y;
+// //     if(cx >= m || cy >= n) return;
     
-    int sn = (n + BLOCK - 1) / BLOCK;
+// //     int sn = (n + BLOCK - 1) / BLOCK;
     
-    float result = 0;
-    // split loop into an outer loop over different blocks, and an inner loop within one block.
-    // we can assume k % BLOCK == 0.
-    for(int i = 0; i < k; i += BLOCK) {
-        // block results accumulates the inner product across a single block.
-        // within each block, scales are constant, so we can lift the scaling 
-        // outside of the inner loop.
-        float block_result = 0;
-        for(int ii = 0; ii < BLOCK; ++ii) {
-            // load input matrix elements and convert to float for computations
-            float av = (float)a[cx + (i + ii) * m];
-            float bv = (float)b[cy + (i + ii) * n];
-            block_result += av * bv; 
-        }
+// //     float result = 0;
+// //     // split loop into an outer loop over different blocks, and an inner loop within one block.
+// //     // we can assume k % BLOCK == 0.
+// //     for(int i = 0; i < k; i += BLOCK) {
+// //         // block results accumulates the inner product across a single block.
+// //         // within each block, scales are constant, so we can lift the scaling 
+// //         // outside of the inner loop.
+// //         float block_result = 0;
+// //         for(int ii = 0; ii < BLOCK; ++ii) {
+// //             // load input matrix elements and convert to float for computations
+// //             float av = (float)a[cx + (i + ii) * m];
+// //             float bv = (float)b[cy + (i + ii) * n];
+// //             block_result += av * bv; 
+// //         }
         
-        // before we can go to the next block, scale the result of the current block
-        // and accumulate to final result
-        // note the different indexing into as and bs
-        result += block_result ;//* as[cx + i/BLOCK * m] * bs[cy/BLOCK + i/BLOCK * sn];
-    }
+// //         // before we can go to the next block, scale the result of the current block
+// //         // and accumulate to final result
+// //         // note the different indexing into as and bs
+// //         result += block_result ;//* as[cx + i/BLOCK * m] * bs[cy/BLOCK + i/BLOCK * sn];
+// //     }
     
-    // finally, write the result as bf16
-    c[cx * n + cy] = result; 
-}
+// //     // finally, write the result as bf16
+// //     c[cx * n + cy] = result; 
+// // }
 
 __global__ void custom_kernel_bak(const float* a, const float* b, const float* as, const float* bs, float* c, int m, int n, int k) {
     // Your implementation here
@@ -331,7 +343,7 @@ __global__ void custom_kernel_bak(const float* a, const float* b, const float* a
 }
 
 
-__global__ void custom_kernel_bak_bak(const float* A, const float* B, const float* as, const float* bs, float* C, int m, int n, int k) {
+__global__ void custom_kernel_bak_bak(const __hip_fp8_e4m3_fnuz* A, const __hip_fp8_e4m3_fnuz* B, const float* as, const float* bs, __hip_bfloat16* C, int m, int n, int k) {
     int tx = threadIdx.x;
     int ty = threadIdx.y;
     int bx = blockIdx.x;
@@ -371,7 +383,6 @@ __global__ void custom_kernel_bak_bak(const float* A, const float* B, const floa
     }
 
     C[cx * n + cy] = C_val;
-
 
 }
 
@@ -418,7 +429,7 @@ __global__ void custom_kernel(const float* A, const float* B, const float* as, c
             //if (i == 0) {
             //    printf("%f %f \n", __shfl_sync(0xffffffff, A_val, j) , __shfl_sync(0xffffffff, B_val, j + 16));
             //}
-            C_val += __shfl_sync(0xffffffff, A_val, j) * __shfl_sync(0xffffffff, B_val, j + 16);
+            //C_val += __shfl_sync(0xffffffff, A_val, j) * __shfl_sync(0xffffffff, B_val, j + 16);
         }
 
     }
@@ -426,23 +437,58 @@ __global__ void custom_kernel(const float* A, const float* B, const float* as, c
     C[cx * n + cy] = C_val;
 }
 
+__global__ void mat_mul_ref(const __hip_fp8_e4m3_fnuz* a, const __hip_fp8_e4m3_fnuz* b, const float* as, const float* bs, __hip_bfloat16* c, int m, int n, int k) {
+                   
+    // Your implementation here
+    int cx = threadIdx.x + blockDim.x * blockIdx.x;
+    int cy = threadIdx.y + blockDim.y * blockIdx.y;
+    if(cx >= m || cy >= n) return;
+    
+    int sn = (n + BLOCK - 1) / BLOCK;
+    
+    float result = 0;
+    // split loop into an outer loop over different blocks, and an inner loop within one block.
+    // we can assume k % BLOCK == 0.
+    for(int i = 0; i < k; i += BLOCK) {
+        // block results accumulates the inner product across a single block.
+        // within each block, scales are constant, so we can lift the scaling 
+        // outside of the inner loop.
+        float block_result = 0;
+        for(int ii = 0; ii < BLOCK; ++ii) {
+            // load input matrix elements and convert to float for computations
+            float av = (float)a[cx + (i + ii) * m];
+            float bv = (float)b[cy + (i + ii) * n];
+            block_result += av * bv; 
+        }
+        
+        // before we can go to the next block, scale the result of the current block
+        // and accumulate to final result
+        // note the different indexing into as and bs
+        result += block_result * as[cx + i/BLOCK * m] * bs[cy/BLOCK + i/BLOCK * sn];
+    }
+    
+    // finally, write the result as bf16
+    c[cx * n + cy] = (__hip_bfloat16)result;
+}
+
+__global__ void mat_mul(const __hip_fp8_e4m3_fnuz* a, const __hip_fp8_e4m3_fnuz* b, const float* as, const float* bs, __hip_bfloat16* c, int m, int n, int k) {}
+
+
 int main() {
 
-    int m = 128;
+    printf("here !!!!");
+    int m = 64;
     float diff = 0.0;
-    int runs = 20;
+    int runs = 5;
     float inc= 0.0;
+
     for (int i = 0; i < runs; i++) {
+        printf("here !!!!");
         inc = compare_mat_mul_kernels(mat_mul_ref, custom_kernel_bak_bak, m, m, m, true, dim3(m/TILE_WIDTH,m/TILE_WIDTH ), dim3(TILE_WIDTH, TILE_WIDTH), dim3(m/8, m/4), dim3(8, 4));  
         if (i != 0) {
           diff += inc;
         }
     }
       printf("\n%f\n", diff/runs);
-      diff = 0.0;
-     // for (int i = 0; i < runs; i++) {
-     //     diff += compare_mat_mul_kernels(mat_mul_ref, custom_kernel, m, m, m, false, dim3(m/TILE_WIDTH,m/TILE_WIDTH ), dim3(TILE_WIDTH, TILE_WIDTH), dim3(m/TILE_WIDTH, m/TILE_WIDTH), dim3(TILE_WIDTH, TILE_WIDTH)); 
-     // }
-     // printf("\n%f\n", diff/runs);
+    printf("done");
 }
-
